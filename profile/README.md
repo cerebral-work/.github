@@ -1,19 +1,44 @@
 <div align="center">
 
-  <img src="./assets/banner.svg" width="100%" alt="CEREBRAL — cognition as infrastructure"/>
+  <img src="./assets/favicon.svg" width="96" height="96" alt="cerebral.work"/>
 
-  <br/><br/>
+  <h1>cerebral.work</h1>
 
-  <a href="https://cerebral.work"><img alt="cerebral.work" src="https://img.shields.io/badge/cerebral.work-0a0a0a?style=flat-square&labelColor=0a0a0a&color=ff4d2e"/></a>
-  <img alt="status" src="https://img.shields.io/badge/status-shaping-ff4d2e?style=flat-square&labelColor=0a0a0a"/>
-  <img alt="v0.1" src="https://img.shields.io/badge/v0.1-mmxxvi-5a5a5a?style=flat-square&labelColor=0a0a0a"/>
+  <p>
+    <strong>neuroscience-grounded tools for LLM coding harnesses</strong>
+  </p>
 
-  <br/><br/>
+  <p>
+    Tools for coherent LLM coding agents — persistent memory and multi-agent orchestration, modeled on how biological minds actually work.
+  </p>
 
-  <sub>
-    <a href="https://cerebral.work">site</a>
+  <p>
+    <a href="https://cerebral.work">cerebral.work</a>
     &nbsp;·&nbsp;
-    <a href="mailto:hello@cerebral.work">hello@cerebral.work</a>
-  </sub>
+    <a href="https://cerebral.work/reverie">reverie</a>
+    &nbsp;·&nbsp;
+    <a href="https://cerebral.work/meshctl">meshctl</a>
+    &nbsp;·&nbsp;
+    <a href="https://cerebral.work/docs">docs</a>
+  </p>
 
+</div>
+
+---
+
+### reverie
+
+A memory daemon modeled on human consolidation. Observation-layer writes, typed-then-distilled reads, sleep-phase consolidation between sessions. Ports 70 years of memory-consolidation research into the daily workflow of building software with AI.
+
+### meshctl
+
+Multi-agent orchestration with file-level locking and coord-protocol messaging. Runs many Claude Code / Cursor / Windsurf sessions in parallel without races. Replaces ad-hoc tmux hacks with a distributed-systems substrate.
+
+---
+
+<div align="center">
+  <sub>
+    LLM coding harnesses accumulate knowledge across sessions but lack a theory of where it should live.
+    We&rsquo;re fixing that.
+  </sub>
 </div>
