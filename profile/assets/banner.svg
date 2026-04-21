@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 360" width="1400" height="360" role="img" aria-label="cerebral.work — neuroscience-grounded tools for LLM coding harnesses">
+  <defs>
+    <pattern id="dots" width="32" height="32" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1" fill="#1f2937"/>
+    </pattern>
+    <radialGradient id="hexGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#EAB308" stop-opacity="0.25"/>
+      <stop offset="100%" stop-color="#EAB308" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- background -->
+  <rect width="1400" height="360" fill="#111827"/>
+  <rect width="1400" height="360" fill="url(#dots)"/>
+
+  <!-- left: node-graph mark, scaled up and centered vertically -->
+  <g transform="translate(180 180)">
+    <circle r="180" fill="url(#hexGlow)"/>
+    <g transform="scale(3.2) translate(-32 -32)">
+      <line x1="32" y1="10" x2="51.0526" y2="21" stroke="#EAB308" stroke-width="3"/>
+      <line x1="51.0526" y1="21" x2="51.0526" y2="43" stroke="#ffffff" stroke-width="2"/>
+      <line x1="51.0526" y1="43" x2="32"      y2="54" stroke="#ffffff" stroke-width="2"/>
+      <line x1="32"      y1="54" x2="12.9474" y2="43" stroke="#ffffff" stroke-width="2"/>
+      <line x1="12.9474" y1="43" x2="12.9474" y2="21" stroke="#ffffff" stroke-width="2"/>
+      <line x1="12.9474" y1="21" x2="32"      y2="10" stroke="#ffffff" stroke-width="2"/>
+      <line x1="51.0526" y1="21" x2="12.9474" y2="43" stroke="#ffffff" stroke-width="1.5"/>
+      <circle cx="32"      cy="10" r="4" fill="#EAB308"/>
+      <circle cx="51.0526" cy="21" r="4" fill="#ffffff"/>
+      <circle cx="51.0526" cy="43" r="4" fill="#ffffff"/>
+      <circle cx="32"      cy="54" r="4" fill="#ffffff"/>
+      <circle cx="12.9474" cy="43" r="4" fill="#ffffff"/>
+      <circle cx="12.9474" cy="21" r="4" fill="#ffffff"/>
+    </g>
+  </g>
+
+  <!-- right: wordmark + tagline -->
+  <g font-family="'Inter', -apple-system, 'Helvetica Neue', sans-serif">
+    <text x="400" y="175" font-size="96" font-weight="800" fill="#f9fafb" letter-spacing="-3">cerebral.work</text>
+    <text x="400" y="220" font-size="22" font-weight="500" fill="#9ca3af" letter-spacing="-0.3">
+      neuroscience-grounded tools for LLM coding harnesses
+    </text>
+  </g>
+
+  <!-- bottom meta line -->
+  <g font-family="ui-monospace, 'JetBrains Mono', 'SF Mono', monospace" font-size="13" fill="#4b5563" letter-spacing="2">
+    <text x="400" y="280">reverie · meshctl</text>
+    <text x="1360" y="280" text-anchor="end">&#x2022; v0.1 / mmxxvi</text>
+  </g>
+
+  <!-- subtle bottom rule -->
+  <line x1="400" y1="250" x2="1360" y2="250" stroke="#1f2937" stroke-width="1"/>
+</svg>

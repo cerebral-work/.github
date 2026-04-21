@@ -1,15 +1,12 @@
 <div align="center">
 
-  <img src="./assets/favicon.svg" width="96" height="96" alt="cerebral.work"/>
+  <img src="./assets/banner.svg" width="100%" alt="cerebral.work — neuroscience-grounded tools for LLM coding harnesses"/>
 
-  <h1>cerebral.work</h1>
-
-  <p>
-    <strong>neuroscience-grounded tools for LLM coding harnesses</strong>
-  </p>
+  <br/><br/>
 
   <p>
-    Tools for coherent LLM coding agents — persistent memory and multi-agent orchestration, modeled on how biological minds actually work.
+    <strong>Tools for coherent LLM coding agents.</strong><br/>
+    Persistent memory and multi-agent orchestration, modeled on how biological minds actually work.
   </p>
 
   <p>
