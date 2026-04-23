@@ -23,7 +23,6 @@
       <line x1="32"      y1="54" x2="12.9474" y2="43" stroke="#ffffff" stroke-width="2"/>
       <line x1="12.9474" y1="43" x2="12.9474" y2="21" stroke="#ffffff" stroke-width="2"/>
       <line x1="12.9474" y1="21" x2="32"      y2="10" stroke="#ffffff" stroke-width="2"/>
-      <line x1="51.0526" y1="21" x2="12.9474" y2="43" stroke="#ffffff" stroke-width="1.5"/>
       <circle cx="32"      cy="10" r="4" fill="#EAB308"/>
       <circle cx="51.0526" cy="21" r="4" fill="#ffffff"/>
       <circle cx="51.0526" cy="43" r="4" fill="#ffffff"/>
