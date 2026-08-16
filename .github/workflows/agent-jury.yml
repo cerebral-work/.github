@@ -39,6 +39,9 @@ name: Agent Jury (reusable)
 #     jury:
 #       uses: cerebral-work/.github/.github/workflows/agent-jury.yml@v1
 #       secrets: inherit
+#       # cerebral-work repos MUST add this — see the `runner` input:
+#       # with:
+#       #   runner: reverie
 #
 # `secrets: inherit` is what passes the org-level AGENT_JURY_API_KEY through.
 # Name the caller job `jury`: GitHub prefixes reusable-workflow check names
@@ -51,11 +54,21 @@ on:
     inputs:
       runner:
         description: >-
-          Runner label. Default `self-hosted` deliberately (OPS-1140): ARC
-          matches the bare scale-set name, so `self-hosted` reaches each org's
-          own pool without pinning the jury to a smaller dedicated one. Repos
-          without a self-hosted pool should pass `ubuntu-latest`, which works
-          only where the gateway is reachable from GitHub-hosted runners.
+          Runner label. ARC matches the bare scale-set NAME, and the two orgs
+          do not have the same scale sets — measured 2026-08-16:
+
+            unsigned-gg    self-hosted (4 online) · reverie-ug (1) · ci-rust (1)
+            cerebral-work  reverie (1 online)
+
+          So `self-hosted` is correct for unsigned-gg and reaches its largest
+          pool (OPS-1140), but there is NO `self-hosted` scale set in
+          cerebral-work: a cerebral-work caller that takes this default will
+          sit queued forever rather than fail. cerebral-work callers MUST pass
+          `runner: reverie`.
+
+          This is the same cross-org label trap OPS-1140 documented, in the
+          opposite direction — a label that exists in one org is not a label
+          that exists in the other, and the failure is a silent hang.
         type: string
         default: self-hosted
       model:
