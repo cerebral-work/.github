@@ -175,7 +175,11 @@ jobs:
           PR_JSON=$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
             "https://api.github.com/repos/$REPO/pulls/$PR_NUMBER")
           PR_TITLE=$(echo "$PR_JSON" | jq -r '.title')
-          PR_BODY=$(echo "$PR_JSON" | jq -r '.body // ""' | head -100)
+          # awk, not `head -100`. Under `set -o pipefail` a head that closes the
+          # pipe after N lines sends SIGPIPE to jq, jq exits non-zero, and the
+          # whole step fails — on exactly the long PR bodies the cap exists for.
+          # awk consumes all input and filters, so the writer never sees SIGPIPE.
+          PR_BODY=$(echo "$PR_JSON" | jq -r '.body // ""' | awk 'NR<=100')
 
           DIFF=$(git diff origin/${{ github.base_ref }}...HEAD --unified=3 2>/dev/null || git diff ${{ github.event.pull_request.base.sha }}...HEAD --unified=3)
 
@@ -190,8 +194,20 @@ jobs:
           # An ordinary multi-file platform PR runs 10-20KB, so 12000 truncated
           # routine changes, not just outliers. glm-5.2's context absorbs 60000
           # comfortably; output stays capped by max_tokens.
-          DIFF_BYTES=$(printf '%s' "$DIFF" | wc -c)
-          DIFF_TRUNCATED=$(printf '%s' "$DIFF" | head -c "$DIFF_BUDGET")
+          # Via a file, NOT `printf | head -c`. head closes the pipe as soon as
+          # it has its bytes, printf takes SIGPIPE, and under `set -o pipefail`
+          # the step dies — so the truncation guard failed precisely when
+          # truncation was needed, and the bigger the diff the more certain the
+          # failure. Measured on soma#112: a 110048-byte diff against a 60000
+          # budget aborted the gather step with
+          # "printf: write error: Broken pipe" before the review ever ran, and
+          # because a passing jury is the merge gate, no >60KB PR could merge on
+          # any repo using this workflow. Reading from a file removes the pipe:
+          # printf writes everything, head seeks and stops, nobody is signalled.
+          DIFF_FILE="${RUNNER_TEMP:-/tmp}/agent-jury-diff.txt"
+          printf '%s' "$DIFF" > "$DIFF_FILE"
+          DIFF_BYTES=$(wc -c < "$DIFF_FILE")
+          DIFF_TRUNCATED=$(head -c "$DIFF_BUDGET" "$DIFF_FILE")
           # Whether truncation happened is stated IN the prompt below. Silently
           # handing a model a severed diff and accepting confident findings about
           # the missing part is how #2141 got two false blockers.
