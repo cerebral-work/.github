@@ -1,0 +1,520 @@
+name: Agent Jury (reusable)
+
+# THE canonical agent jury for the cerebral-work + unsigned-gg estate.
+#
+# Automated code review on every PR using GLM-5.2 via the LiteLLM gateway.
+# Posts a structured review comment and stamps one of four labels
+# (agent-jury-approved / -needs-changes / -changes-requested / -error).
+#
+# WHY THIS FILE EXISTS, AND WHY IT IS HERE.
+#
+# Until 2026-08-16 this workflow was copy-pasted into fifteen repositories and
+# had drifted into four mutually incompatible versions. A fix landed in one
+# repo reached none of the other fourteen, so every improvement had to be
+# hand-ported and most never were. Separately, all twenty-six repos carrying a
+# jury credential held their own copy of it, which meant one dead gateway key
+# silently broke every jury in the estate at once and needed twenty-six
+# rotations to repair.
+#
+# Both problems are structural, so both are fixed structurally: ONE callable
+# workflow, and ONE org-level secret per org.
+#
+# This lives in cerebral-work/.github because it is PUBLIC. Both orgs are on
+# the GitHub Free plan, where a private repository's reusable workflows cannot
+# be called across organizations at all — so a private host could serve
+# unsigned-gg or cerebral-work, never both. Publishing costs nothing here: the
+# identical logic was already public in escapement, omp, cerebral-work/site
+# and linearctl, and this file contains no credentials.
+#
+# CALLING IT (the entire caller, in any repo in either org):
+#
+#   name: Agent Jury
+#   on:
+#     pull_request:
+#       types: [opened, synchronize, reopened, ready_for_review]
+#   permissions:
+#     contents: read
+#     pull-requests: write
+#   jobs:
+#     jury:
+#       uses: cerebral-work/.github/.github/workflows/agent-jury.yml@v1
+#       secrets: inherit
+#
+# `secrets: inherit` is what passes the org-level AGENT_JURY_API_KEY through.
+# Name the caller job `jury`: GitHub prefixes reusable-workflow check names
+# with the caller's job name, so that yields `jury / GLM-5.2 code review`.
+# Any branch protection naming the old bare `GLM-5.2 code review` must be
+# updated to the prefixed form.
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: >-
+          Runner label. Default `self-hosted` deliberately (OPS-1140): ARC
+          matches the bare scale-set name, so `self-hosted` reaches each org's
+          own pool without pinning the jury to a smaller dedicated one. Repos
+          without a self-hosted pool should pass `ubuntu-latest`, which works
+          only where the gateway is reachable from GitHub-hosted runners.
+        type: string
+        default: self-hosted
+      model:
+        description: Model for substantial diffs.
+        type: string
+        default: glm-5.2
+      fast_model:
+        description: Model for small or non-Rust diffs.
+        type: string
+        default: glm-5.2-fast
+      api_url:
+        description: LiteLLM gateway base URL, no trailing slash.
+        type: string
+        default: http://llm.llm.svc.cluster.local:4000
+      diff_budget:
+        description: >-
+          Bytes of diff sent to the model. 60000, chosen against the real
+          distribution rather than as a round number — see the truncation note
+          in the gather step.
+        type: number
+        default: 60000
+      timeout_minutes:
+        description: Timeout for the review job.
+        type: number
+        default: 10
+    secrets:
+      AGENT_JURY_API_KEY:
+        description: >-
+          LiteLLM gateway key. Set ONCE as an org-level secret per org
+          (visibility all) and reach it with `secrets: inherit`. Do not
+          re-add it as a repo secret — a repo secret shadows the org one and
+          recreates the twenty-six-copy rotation problem this file exists to
+          end.
+        required: false
+    outputs:
+      verdict:
+        description: approved | needs-changes | changes-requested (empty if not delivered)
+        value: ${{ jobs.review.outputs.verdict }}
+      review_failed:
+        description: "true when the reviewer never returned a verdict"
+        value: ${{ jobs.review.outputs.review_failed }}
+
+jobs:
+  review:
+    # TIER 2 of 3 — "error". Green here means the reviewer RAN and returned a
+    # parseable verdict; red means the review pipeline itself broke (gateway
+    # error, empty content, unparseable JSON). It says nothing about whether
+    # the diff is good — that is the `verdict` job below.
+    #
+    # Splitting the two is what makes three tiers expressible at all. A GitHub
+    # Actions job conclusion can only be success/failure/skipped — never
+    # `neutral` — so one job cannot carry pass, fail AND error distinguishably.
+    # Two jobs can, because a `needs:` dependant is skipped when its parent
+    # fails (see the tier table on the `verdict` job).
+    #
+    # This RETIRES the inverted-signal problem rather than re-creating it
+    # (OPS-1139). The old objection to reding on reviewer breakage was that one
+    # check then meant red-when-the-reviewer-crashed and
+    # green-when-the-reviewer-objected. That inversion existed because both
+    # outcomes shared a check. They no longer do: this check reds only on
+    # breakage, `GLM-5.2 code review` reds only on objections.
+    name: GLM-5.2 review delivered
+    outputs:
+      verdict: ${{ steps.review.outputs.verdict }}
+      review_failed: ${{ steps.review.outputs.review_failed }}
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    if: github.event.pull_request.draft == false
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Gather PR diff + context
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DIFF_BUDGET: ${{ inputs.diff_budget }}
+        run: |
+          set -euo pipefail
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          REPO="${{ github.repository }}"
+
+          PR_JSON=$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO/pulls/$PR_NUMBER")
+          PR_TITLE=$(echo "$PR_JSON" | jq -r '.title')
+          PR_BODY=$(echo "$PR_JSON" | jq -r '.body // ""' | head -100)
+
+          DIFF=$(git diff origin/${{ github.base_ref }}...HEAD --unified=3 2>/dev/null || git diff ${{ github.event.pull_request.base.sha }}...HEAD --unified=3)
+
+          # The budget was 12000 and produced CONFIDENT FALSE BLOCKERS. Measured
+          # on unsigned-paas PR #2141: a 14485-byte workflow diff was cut at
+          # 12000, the tail held a complete job definition, and the jury reported
+          # that job "truncated before its runs-on/needs/step keys, rendering the
+          # workflow syntactically invalid" — verdict needs-changes, confidence
+          # HIGH. The job was complete; actionlint and a YAML parse both passed.
+          # The reviewer was describing its own truncated input.
+          #
+          # An ordinary multi-file platform PR runs 10-20KB, so 12000 truncated
+          # routine changes, not just outliers. glm-5.2's context absorbs 60000
+          # comfortably; output stays capped by max_tokens.
+          DIFF_BYTES=$(printf '%s' "$DIFF" | wc -c)
+          DIFF_TRUNCATED=$(printf '%s' "$DIFF" | head -c "$DIFF_BUDGET")
+          # Whether truncation happened is stated IN the prompt below. Silently
+          # handing a model a severed diff and accepting confident findings about
+          # the missing part is how #2141 got two false blockers.
+          if [ "$DIFF_BYTES" -gt "$DIFF_BUDGET" ]; then
+            DIFF_NOTE="TRUNCATED — you are seeing the first ${DIFF_BUDGET} of ${DIFF_BYTES} bytes. The remainder is NOT shown."
+          else
+            DIFF_NOTE="complete — ${DIFF_BYTES} bytes, nothing withheld."
+          fi
+          DIFF_LINES=$(echo "$DIFF" | wc -l)
+          FILES_CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD 2>/dev/null || echo "unknown")
+
+          {
+            echo "number=$PR_NUMBER"
+            echo "title<<EOF"
+            echo "$PR_TITLE"
+            echo "EOF"
+            echo "body<<EOF"
+            echo "$PR_BODY"
+            echo "EOF"
+            echo "files<<EOF"
+            echo "$FILES_CHANGED"
+            echo "EOF"
+            echo "diff_lines=$DIFF_LINES"
+            echo "diff_note=$DIFF_NOTE"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "$DIFF_TRUNCATED" > /tmp/pr-diff.txt
+
+      - name: Run GLM-5.2 review
+        id: review
+        env:
+          LITELLM_URL: ${{ inputs.api_url }}
+          LITELLM_KEY: ${{ secrets.AGENT_JURY_API_KEY }}
+          JURY_MODEL_FULL: ${{ inputs.model }}
+          JURY_MODEL_FAST: ${{ inputs.fast_model }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          PR_TITLE: ${{ steps.pr.outputs.title }}
+          FILES_CHANGED: ${{ steps.pr.outputs.files }}
+          # Must cross the step boundary via outputs — DIFF_NOTE is a shell
+          # variable in the gather step, and each `run:` is a separate shell, so
+          # referencing it directly in the prompt below would silently expand to
+          # empty and the model would be told nothing about truncation.
+          DIFF_NOTE: ${{ steps.pr.outputs.diff_note }}
+        run: |
+          set -euo pipefail
+
+          DIFF=$(cat /tmp/pr-diff.txt)
+
+          HAS_RUST=$(echo "$FILES_CHANGED" | grep -c '\.rs$' || true)
+          DIFF_LINES=$(echo "$DIFF" | wc -l)
+
+          if [ "$HAS_RUST" -gt 0 ] && [ "$DIFF_LINES" -gt 50 ]; then
+            JURY_MODEL="$JURY_MODEL_FULL"
+            MAX_TOKENS=1000000
+          else
+            JURY_MODEL="$JURY_MODEL_FAST"
+            MAX_TOKENS=4096
+          fi
+          echo "Using model=$JURY_MODEL max_tokens=$MAX_TOKENS (rust=$HAS_RUST lines=$DIFF_LINES)" >&2
+          echo "model_used=$JURY_MODEL" >> "$GITHUB_OUTPUT"
+
+          REVIEW_PROMPT="Code review. Read the diff. Report only what you can verify from the code. No speculation, no hedging, no restating the diff.
+
+          PR #${PR_NUMBER}: ${PR_TITLE}
+          Files: ${FILES_CHANGED}
+          Diff completeness: ${DIFF_NOTE}
+
+          \`\`\`diff
+          ${DIFF}
+          \`\`\`
+
+          WHAT YOU ARE LOOKING AT, AND WHAT YOU ARE NOT. This is a DIFF, not the files. Unchanged code is NOT shown, and the diff may be truncated as noted above. Therefore you CANNOT conclude that anything is missing, absent, undefined, incomplete or truncated in the FILE from not seeing it here — that is the single most common way this review produces a false blocker. Two real examples, both reported at high confidence and both wrong: 'this job is truncated before its runs-on/needs/step keys, rendering the workflow syntactically invalid' (the job was complete; the diff was cut mid-hunk), and 'the step never writes this output' (it did, on an unchanged line the diff never showed).
+
+          So: NEVER report a finding whose evidence is the ABSENCE of something. If code you would need in order to judge is not visible, that is not a defect — say nothing about it. Report only defects visible in the lines PRESENT here. A file that lints and parses in CI is not syntactically invalid because your excerpt ended mid-hunk.
+
+          Identify: logic errors, panic paths on untrusted input, security holes, broken contracts, resource leaks. Cite the specific line or pattern. If you cannot ground a finding in the diff, do not report it.
+
+          JSON only, no fences:
+          {\"verdict\":\"approved\"|\"needs-changes\"|\"changes-requested\",\"confidence\":\"high\"|\"medium\"|\"low\",\"findings\":[{\"severity\":\"blocker\"|\"warning\",\"file\":\"path\",\"line\":<num|null>,\"issue\":\"<one sentence, the defect>\",\"suggestion\":\"<one sentence, the fix>\"}],\"summary\":\"<two sentences: what changed, what risks remain>\"}
+
+          Trivial diffs (deps, fmt, docs): {\"verdict\":\"approved\",\"confidence\":\"high\",\"findings\":[],\"summary\":\"No logic changes.\"}"
+
+          REQUEST_BODY=$(jq -nc \
+            --arg model "$JURY_MODEL" \
+            --arg prompt "$REVIEW_PROMPT" \
+            --argjson max_tokens "$MAX_TOKENS" \
+            '{model: $model, messages: [{role: "user", content: $prompt}], temperature: 0.2, max_tokens: $max_tokens}')
+
+          # `-s` and NOT `-sf` on purpose. With `-f`, curl prints nothing on an
+          # HTTP error, so the response came back EMPTY and the log line read
+          # literally "GLM review request failed: " — no status, no body, no
+          # reason. Three review failures were recorded that way without one of
+          # them saying why.
+          #
+          # An error tier that is visible but not diagnosable is half a tier, so
+          # the status code and body are captured explicitly instead of being
+          # thrown away. Dropping `-f` moves failure detection from curl's exit
+          # code to an explicit status check below; a transport-level failure
+          # (DNS, refused, timeout) still exits non-zero and is caught as 000.
+          #
+          # Built as an ARRAY, never an eval'd string: the key must not be
+          # word-split, and nothing here should pass through a second shell
+          # expansion.
+          CURL_ARGS=(-s -m 300 -X POST -H "Content-Type: application/json")
+          if [ -n "${LITELLM_KEY:-}" ]; then
+            CURL_ARGS+=(-H "Authorization: Bearer $LITELLM_KEY")
+          fi
+          CURL_ARGS+=(-d "$REQUEST_BODY")
+
+          HTTP_CODE=$(curl "${CURL_ARGS[@]}" \
+            -o /tmp/glm-response.json -w '%{http_code}' \
+            "$LITELLM_URL/chat/completions" 2>/dev/null) || HTTP_CODE="000"
+          RESPONSE=$(cat /tmp/glm-response.json 2>/dev/null || true)
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "review_failed=true" >> "$GITHUB_OUTPUT"
+            # Surfaced in the PR comment too — the reason belongs where the
+            # reader already is, not only in a log they have to go find.
+            echo "failure_reason=HTTP ${HTTP_CODE}" >> "$GITHUB_OUTPUT"
+            # Truncated: an upstream 5xx can return an HTML error page, and the
+            # whole thing in the log buries the status line that matters.
+            echo "GLM review request failed: HTTP ${HTTP_CODE} (000 = transport failure: DNS, connection refused, or timeout). Model: ${JURY_MODEL}. URL: ${LITELLM_URL}. Body (first 500 bytes): $(head -c 500 /tmp/glm-response.json 2>/dev/null)" >&2
+            exit 0
+          fi
+
+          CONTENT=$(echo "$RESPONSE" | jq -r '
+            .choices[0].message.content //
+            .choices[0].message.reasoning_content //
+            empty' 2>/dev/null)
+
+          if [ -z "$CONTENT" ] || [ "$CONTENT" = "null" ]; then
+            echo "review_failed=true" >> "$GITHUB_OUTPUT"
+            echo "failure_reason=HTTP 200 but empty completion content" >> "$GITHUB_OUTPUT"
+            echo "GLM-5.2 returned empty content. Raw response: $RESPONSE" >&2
+            exit 0
+          fi
+
+          CLEAN=$(echo "$CONTENT" | sed 's/^```json//; s/^```//; s/```$//' | jq '.' 2>/dev/null)
+
+          if [ -z "$CLEAN" ]; then
+            echo "review_failed=true" >> "$GITHUB_OUTPUT"
+            echo "failure_reason=model returned unparseable JSON" >> "$GITHUB_OUTPUT"
+            echo "GLM-5.2 response was not valid JSON: $CONTENT" >&2
+            exit 0
+          fi
+
+          VERDICT=$(echo "$CLEAN" | jq -r '.verdict // "needs-changes"')
+          CONFIDENCE=$(echo "$CLEAN" | jq -r '.confidence // "low"')
+          FINDINGS_COUNT=$(echo "$CLEAN" | jq '.findings | length')
+
+          # WHITELIST BEFORE THIS TOUCHES $GITHUB_OUTPUT.
+          #
+          # VERDICT is raw model output, and the prompt embeds the PR title,
+          # body and diff — all author-controlled. Two holes close here:
+          #
+          #  1. GITHUB_OUTPUT forgery. `echo "verdict=$VERDICT"` with a verdict
+          #     containing a newline followed by `verdict=approved` writes TWO
+          #     key=value lines; the last wins, and the gate below goes green on
+          #     an attacker-chosen value.
+          #  2. Anything downstream that interpolates the value.
+          #
+          # Collapsing to a fixed enum makes both structurally impossible — no
+          # newline, no metacharacter, no unexpected token can survive.
+          case "$VERDICT" in
+            approved|needs-changes|changes-requested) ;;
+            *) echo "Unrecognised verdict from model; coercing to needs-changes." >&2
+               VERDICT="needs-changes" ;;
+          esac
+          case "$CONFIDENCE" in
+            high|medium|low) ;;
+            *) CONFIDENCE="low" ;;
+          esac
+          # Digits only, else 0.
+          case "$FINDINGS_COUNT" in
+            ''|*[!0-9]*) FINDINGS_COUNT=0 ;;
+          esac
+
+          echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
+          echo "confidence=$CONFIDENCE" >> "$GITHUB_OUTPUT"
+          echo "findings_count=$FINDINGS_COUNT" >> "$GITHUB_OUTPUT"
+          echo "$CLEAN" > /tmp/jury-parsed.json
+
+      - name: Post review comment + stamp label
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          REPO: ${{ github.repository }}
+          VERDICT: ${{ steps.review.outputs.verdict }}
+          CONFIDENCE: ${{ steps.review.outputs.confidence }}
+          FINDINGS_COUNT: ${{ steps.review.outputs.findings_count }}
+          REVIEW_FAILED: ${{ steps.review.outputs.review_failed }}
+          FAILURE_REASON: ${{ steps.review.outputs.failure_reason }}
+          MODEL: ${{ steps.review.outputs.model_used }}
+        run: |
+          set -euo pipefail
+          API="https://api.github.com/repos/$REPO"
+          AUTH="Authorization: Bearer $GH_TOKEN"
+          ACCEPT="Accept: application/vnd.github+json"
+
+          for lbl in agent-jury-approved agent-jury-needs-changes agent-jury-changes-requested agent-jury-error; do
+            curl -sf -X DELETE -H "$AUTH" -H "$ACCEPT" "$API/issues/$PR_NUMBER/labels/$lbl" 2>/dev/null || true
+          done
+
+          if [ "${REVIEW_FAILED:-}" = "true" ]; then
+            # Its OWN label. This path used to stamp `agent-jury-needs-changes`,
+            # which asserts the reviewer read the diff and objected — when in
+            # fact it never got a verdict at all. Observed live: green check,
+            # `needs-changes` label, and a comment saying the review could not
+            # complete. Three surfaces, three different stories.
+            LABEL="agent-jury-error"
+            BODY="## 🤖 Agent Jury — ⚠️ error (review not delivered)
+
+            The GLM-5.2 review could not complete (gateway error, empty response,
+            or unparseable JSON). **This is not a finding against the diff** — the
+            reviewer never returned a verdict. Manual review required.
+
+            | Field | Value |
+            |---|---|
+            | Model | \`${MODEL:-unknown}\` |
+            | Tier | ⚠️ error |
+            | Verdict | none — not delivered |
+            | Reason | ${FAILURE_REASON:-unrecorded} |
+
+            Re-run this workflow to retry. If the reason is a transient gateway
+            401 (\"cached plan must not change result type\"), retry rather than
+            rotating the key — that is a known gateway DB hiccup. A persistent
+            401 \"token not found\" means the org-level AGENT_JURY_API_KEY needs
+            re-minting, which is an operator action.
+            "
+          else
+            JURY_JSON=$(cat /tmp/jury-parsed.json)
+
+            # ⚠️ is reserved for the error tier and appears nowhere else, so the
+            # caution symbol always means "no verdict was delivered" and never
+            # "the reviewer objected". needs-changes takes 🟠: same fail tier as
+            # changes-requested, different severity within it.
+            case "$VERDICT" in
+              approved)          LABEL="agent-jury-approved"; EMOJI="✅" ;;
+              needs-changes)     LABEL="agent-jury-needs-changes"; EMOJI="🟠" ;;
+              changes-requested) LABEL="agent-jury-changes-requested"; EMOJI="🔴" ;;
+              *)                 LABEL="agent-jury-needs-changes"; EMOJI="🟠" ;;
+            esac
+
+            FINDINGS_MD=$(echo "$JURY_JSON" | jq -r '
+              .findings // [] |
+              if length == 0 then
+                "_No findings — the diff looks clean._"
+              else
+                "| Severity | File | Line | Issue | Suggestion |\n|---|---|---|---|---|\n" +
+                ([.[] | "| \(.severity // "?") | \(.file // "?") | \(.line // "—") | \(.issue // "") | \(.suggestion // "") |"] | join("\n"))
+              end
+            ')
+
+            SUMMARY=$(echo "$JURY_JSON" | jq -r '.summary // "No summary provided"')
+
+            BODY="## 🤖 Agent Jury — ${EMOJI} ${VERDICT}
+
+            | Field | Value |
+            |---|---|
+            | Model | \`${MODEL:-unknown}\` |
+            | Verdict | **${VERDICT}** |
+            | Confidence | ${CONFIDENCE} |
+            | Findings | ${FINDINGS_COUNT} |
+
+            ### Summary
+            ${SUMMARY}
+
+            ### Findings
+            ${FINDINGS_MD}
+
+            ---
+            _Automated review by GLM-5.2 via the LiteLLM gateway. Advisory — a human makes the final call._
+            "
+          fi
+
+          echo "$(jq -nc --arg b "$BODY" '{body: $b}')" | \
+            curl -sf -X POST -H "$AUTH" -H "$ACCEPT" -d @- \
+            "$API/issues/$PR_NUMBER/comments" 2>/dev/null || true
+
+          curl -sf -X POST -H "$AUTH" -H "$ACCEPT" \
+            -d "{\"labels\":[\"$LABEL\"]}" \
+            "$API/issues/$PR_NUMBER/labels" 2>/dev/null || true
+          echo "Agent jury verdict: ${VERDICT:-none} (label: $LABEL)"
+
+      # ERROR TIER. Reds this job — and ONLY this job — when the review pipeline
+      # broke. The three failure paths in "Run GLM-5.2 review" all still `exit 0`
+      # so that the comment and label above are posted first; this step is what
+      # converts `review_failed` into a check state instead of discarding it.
+      #
+      # Keeping the error path GREEN is what produced the failure this whole
+      # standardisation came out of: every check green on PRs the jury had never
+      # read, because its gateway key had been deleted months earlier and
+      # nothing surfaced the 401.
+      #
+      # Non-blocking by default — this is a distinct context name, so no
+      # existing branch protection requires it. A flaky gateway makes it visibly
+      # red without stopping a merge. Whether error SHOULD block is a
+      # required-checks decision, not a property of this workflow.
+      - name: Fail when the review was not delivered
+        if: steps.review.outputs.review_failed == 'true'
+        env:
+          FAILURE_REASON: ${{ steps.review.outputs.failure_reason }}
+        run: |
+          echo "::error::The GLM-5.2 review did not complete (${FAILURE_REASON:-reason not captured}) — no verdict was delivered. This is a reviewer/gateway failure, NOT a finding against the diff. Re-run this workflow; see the review comment on the PR."
+          exit 1
+
+  verdict:
+    # TIER 1 and 3 of 3 — "pass" and "fail". Keeps the check name
+    # `GLM-5.2 code review`, which is what that name has always meant.
+    #
+    # THE TIER TABLE (this is the whole point of the split):
+    #
+    #   tier   | GLM-5.2 review delivered | GLM-5.2 code review
+    #   -------|--------------------------|--------------------
+    #   pass   | success                  | success
+    #   fail   | success                  | failure
+    #   error  | failure                  | skipped
+    #
+    # Three states, each a distinct pair, none ambiguous. `skipped` is not
+    # something this job chooses — GitHub skips a `needs:` dependant when its
+    # parent job fails, so the error tier's shape is structural rather than
+    # conditional. It cannot be green on a review that never happened, because
+    # it cannot run at all.
+    #
+    # Both forges accept skipped as non-blocking: GitHub protection treats
+    # successful/skipped/neutral as passing, and the Forgejo status bridge maps
+    # `skipped` -> `success` for the same reason. So an error keeps this check
+    # out of the way rather than jamming it Pending.
+    name: GLM-5.2 code review
+    needs: review
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 5
+    steps:
+      # Verdict taxonomy (operator ruling 2026-08-04, OPS-1126): ONLY a clean
+      # `approved` passes. `needs-changes` AND `changes-requested` both red.
+      #
+      # The narrower "changes-requested only" version would not have caught the
+      # case that motivated this: a workflow verdict of `needs-changes` would
+      # still have merged green carrying a fail-open path guard, while a
+      # separate jury agent returned REQUEST_CHANGES on the same diff. Two
+      # reviewers, different severity, and a gate keyed to the lenient one is
+      # not a gate.
+      #
+      # Expressed as "not approved" rather than an enumeration, so a missing or
+      # unrecognised verdict fails closed too.
+      - name: Fail unless the jury approved
+        if: needs.review.outputs.verdict != 'approved'
+        # Via env:, never `${{ }}` inside run:. Direct interpolation of a
+        # model-derived value into the shell is Actions script injection — and
+        # this runs on a self-hosted runner, firing precisely when the verdict
+        # is something unexpected. The enum whitelist in the review job already
+        # makes the value safe; this is the second lock.
+        env:
+          VERDICT: ${{ needs.review.outputs.verdict }}
+        run: |
+          echo "::error::Agent jury verdict: '${VERDICT:-none}' — only 'approved' passes. See the review comment on this PR."
+          exit 1
