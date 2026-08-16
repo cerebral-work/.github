@@ -295,9 +295,35 @@ jobs:
           # Built as an ARRAY, never an eval'd string: the key must not be
           # word-split, and nothing here should pass through a second shell
           # expansion.
+          # TWO SOURCES FOR THE KEY, in priority order.
+          #
+          #  1. The Actions secret — works for public repos via the org-level
+          #     secret, and for private repos only if they carry a repo-level
+          #     one (Free-plan limitation, see the header).
+          #  2. AGENT_JURY_GATEWAY_KEY from the RUNNER's own environment,
+          #     injected into the ARC runner pods from a k8s Secret fed by
+          #     OpenBao/ESO.
+          #
+          # (2) is the target state: it needs no GitHub secret at all, works
+          # identically for public and private repos, and leaves exactly one
+          # rotation point. It is not a new exposure — these runners already
+          # have network reach to the gateway, so anyone who can run a job on
+          # them could call it regardless of where the key is stored.
+          KEY="${LITELLM_KEY:-${AGENT_JURY_GATEWAY_KEY:-}}"
+
+          # Actions masks values it knows are secrets. A key arriving from the
+          # runner environment is NOT one of those, so mask it explicitly
+          # before it can reach a log through an error path.
+          if [ -n "$KEY" ] && [ -z "${LITELLM_KEY:-}" ]; then
+            echo "::add-mask::$KEY"
+            echo "Gateway key sourced from the runner environment." >&2
+          fi
+
           CURL_ARGS=(-s -m 300 -X POST -H "Content-Type: application/json")
-          if [ -n "${LITELLM_KEY:-}" ]; then
-            CURL_ARGS+=(-H "Authorization: Bearer $LITELLM_KEY")
+          if [ -n "$KEY" ]; then
+            CURL_ARGS+=(-H "Authorization: Bearer $KEY")
+          else
+            echo "No gateway key from either source (Actions secret or runner env)." >&2
           fi
           CURL_ARGS+=(-d "$REQUEST_BODY")
 
