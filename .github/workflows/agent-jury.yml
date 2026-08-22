@@ -335,7 +335,16 @@ jobs:
             echo "Gateway key sourced from the runner environment." >&2
           fi
 
-          CURL_ARGS=(-s -m 300 -X POST -H "Content-Type: application/json")
+          # 540s, not 300. A budget-filling diff (60000 bytes) can take the
+          # model longer than five minutes through the gateway, and curl's cap
+          # firing looks identical to a dead network: it returns 000. Measured
+          # 2026-08-21 on cerebral-work/reverie#1694 — request logged 20:38:26Z,
+          # HTTP 000 at 20:43:26Z, exactly 300s, while the gateway answered a
+          # control probe from the same runner pod in 8ms. Large PRs were
+          # therefore unreviewable, deterministically, and re-running could
+          # never help. 540 stays inside timeout_minutes (10 = 600s).
+          CURL_TIMEOUT="${CURL_TIMEOUT:-540}"
+          CURL_ARGS=(-s -m "$CURL_TIMEOUT" -X POST -H "Content-Type: application/json")
           if [ -n "$KEY" ]; then
             CURL_ARGS+=(-H "Authorization: Bearer $KEY")
           else
@@ -343,6 +352,7 @@ jobs:
           fi
           CURL_ARGS+=(-d "$REQUEST_BODY")
 
+          REQUEST_STARTED=$(date +%s)
           HTTP_CODE=$(curl "${CURL_ARGS[@]}" \
             -o /tmp/glm-response.json -w '%{http_code}' \
             "$LITELLM_URL/chat/completions" 2>/dev/null) || HTTP_CODE="000"
@@ -355,7 +365,22 @@ jobs:
             echo "failure_reason=HTTP ${HTTP_CODE}" >> "$GITHUB_OUTPUT"
             # Truncated: an upstream 5xx can return an HTML error page, and the
             # whole thing in the log buries the status line that matters.
-            echo "GLM review request failed: HTTP ${HTTP_CODE} (000 = transport failure: DNS, connection refused, or timeout). Model: ${JURY_MODEL}. URL: ${LITELLM_URL}. Body (first 500 bytes): $(head -c 500 /tmp/glm-response.json 2>/dev/null)" >&2
+            # A 000 has two very different causes and they need different
+            # actions, so name which one it was instead of listing both. An
+            # elapsed time at (or within a second of) the cap is the timeout;
+            # anything much shorter is a genuine transport failure. Collapsing
+            # them into one string cost an investigation several hours chasing
+            # egress policy while the real answer was curl's own -m.
+            ELAPSED=$(( $(date +%s) - REQUEST_STARTED ))
+            if [ "$HTTP_CODE" = "000" ] && [ "$ELAPSED" -ge $(( CURL_TIMEOUT - 1 )) ]; then
+              DIAG="TIMEOUT after ${ELAPSED}s (curl -m ${CURL_TIMEOUT}). The gateway was reachable; the model did not answer in time. Usually a budget-filling diff — raise CURL_TIMEOUT or reduce diff_budget, but note that truncating too hard produces confident false blockers."
+            elif [ "$HTTP_CODE" = "000" ]; then
+              DIAG="TRANSPORT FAILURE after ${ELAPSED}s (DNS, connection refused, or reset) — the gateway was NOT reached. Check egress/NetworkPolicy from this runner to ${LITELLM_URL}."
+            else
+              DIAG="gateway answered HTTP ${HTTP_CODE}"
+            fi
+            echo "failure_diagnosis=${DIAG}" >> "$GITHUB_OUTPUT"
+            echo "GLM review request failed: ${DIAG} Model: ${JURY_MODEL}. URL: ${LITELLM_URL}. Body (first 500 bytes): $(head -c 500 /tmp/glm-response.json 2>/dev/null)" >&2
             exit 0
           fi
 
