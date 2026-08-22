@@ -113,6 +113,15 @@ on:
         description: Timeout for the review job.
         type: number
         default: 10
+      curl_timeout_secs:
+        description: >-
+          Seconds curl waits for the model. 0 (the default) DERIVES it as
+          timeout_minutes*60 - 60, which keeps the cap strictly inside the
+          job budget so the error path always gets to run. Set a number
+          only to override deliberately; setting one larger than the job
+          budget reintroduces the bug this coupling exists to prevent.
+        type: number
+        default: 0
     secrets:
       AGENT_JURY_API_KEY:
         description: >-
@@ -243,6 +252,11 @@ jobs:
           LITELLM_KEY: ${{ secrets.AGENT_JURY_API_KEY }}
           JURY_MODEL_FULL: ${{ inputs.model }}
           JURY_MODEL_FAST: ${{ inputs.fast_model }}
+          # Both halves of the coupling reach the script, so the cap can be
+          # DERIVED from the job budget rather than hoping a caller keeps two
+          # numbers in sync by hand.
+          CURL_TIMEOUT_INPUT: ${{ inputs.curl_timeout_secs }}
+          JOB_TIMEOUT_MINUTES: ${{ inputs.timeout_minutes }}
           PR_NUMBER: ${{ steps.pr.outputs.number }}
           PR_TITLE: ${{ steps.pr.outputs.title }}
           FILES_CHANGED: ${{ steps.pr.outputs.files }}
@@ -335,7 +349,43 @@ jobs:
             echo "Gateway key sourced from the runner environment." >&2
           fi
 
-          CURL_ARGS=(-s -m 300 -X POST -H "Content-Type: application/json")
+          # The cap was too tight for OBSERVED MODEL LATENCY — not for big
+          # diffs. Diff size cannot be the driver: the input is hard-truncated
+          # to DIFF_BUDGET before the model sees it, so a 65KB PR sends exactly
+          # what a 60KB PR sends. Measured across real runs on this workflow,
+          # size and wall-clock do not track (32KB->64s, 43KB->216s, 52KB->109s,
+          # a small one ->155s), and reverie#1694 DELIVERED a verdict on 52,822
+          # bytes in 109s before later exceeding 300s on input truncation had
+          # capped at the same size. What the cap buys is headroom against
+          # variance, so do NOT "optimise" by shrinking diff_budget — this file
+          # already records that 12000 produced confident false blockers.
+          #
+          # curl's cap firing is indistinguishable from a dead network: it
+          # returns 000. Measured 2026-08-21 on reverie#1694 — request logged
+          # 20:38:26Z, failure 20:43:26Z, 300.069s against a 300s cap, while a
+          # control probe from the same runner pod got HTTP 401 from the
+          # gateway in 8ms.
+          #
+          # DERIVED from the job budget, not hardcoded: a cap outside
+          # timeout-minutes means GitHub kills the job before the error path
+          # runs, producing a cancelled job with NO explanation — strictly
+          # worse than a wrong message. Deriving keeps the two coupled
+          # structurally instead of by comment.
+          if [ "${CURL_TIMEOUT_INPUT:-0}" -gt 0 ] 2>/dev/null; then
+            CURL_TIMEOUT="$CURL_TIMEOUT_INPUT"
+          else
+            CURL_TIMEOUT=$(( ${JOB_TIMEOUT_MINUTES:-10} * 60 - 60 ))
+          fi
+          [ "$CURL_TIMEOUT" -lt 30 ] && CURL_TIMEOUT=30
+          # An explicit override is the caller's to make, but say so loudly
+          # when it lands outside the job budget: past that line GitHub kills
+          # the job before the error path runs and the reader gets a cancelled
+          # job with no reason at all.
+          JOB_BUDGET_SECS=$(( ${JOB_TIMEOUT_MINUTES:-10} * 60 ))
+          if [ "$CURL_TIMEOUT" -ge "$JOB_BUDGET_SECS" ]; then
+            echo "::warning::curl_timeout_secs=${CURL_TIMEOUT}s is at or beyond the job budget (${JOB_BUDGET_SECS}s). A timeout will be killed by the job before it can report a diagnosis. Raise timeout_minutes too."
+          fi
+          CURL_ARGS=(-s -m "$CURL_TIMEOUT" -X POST -H "Content-Type: application/json")
           if [ -n "$KEY" ]; then
             CURL_ARGS+=(-H "Authorization: Bearer $KEY")
           else
@@ -343,6 +393,7 @@ jobs:
           fi
           CURL_ARGS+=(-d "$REQUEST_BODY")
 
+          REQUEST_STARTED=$(date +%s)
           HTTP_CODE=$(curl "${CURL_ARGS[@]}" \
             -o /tmp/glm-response.json -w '%{http_code}' \
             "$LITELLM_URL/chat/completions" 2>/dev/null) || HTTP_CODE="000"
@@ -355,7 +406,22 @@ jobs:
             echo "failure_reason=HTTP ${HTTP_CODE}" >> "$GITHUB_OUTPUT"
             # Truncated: an upstream 5xx can return an HTML error page, and the
             # whole thing in the log buries the status line that matters.
-            echo "GLM review request failed: HTTP ${HTTP_CODE} (000 = transport failure: DNS, connection refused, or timeout). Model: ${JURY_MODEL}. URL: ${LITELLM_URL}. Body (first 500 bytes): $(head -c 500 /tmp/glm-response.json 2>/dev/null)" >&2
+            # A 000 has two very different causes and they need different
+            # actions, so name which one it was instead of listing both. An
+            # elapsed time at (or within a second of) the cap is the timeout;
+            # anything much shorter is a genuine transport failure. Collapsing
+            # them into one string cost an investigation several hours chasing
+            # egress policy while the real answer was curl's own -m.
+            ELAPSED=$(( $(date +%s) - REQUEST_STARTED ))
+            if [ "$HTTP_CODE" = "000" ] && [ "$ELAPSED" -ge $(( CURL_TIMEOUT - 1 )) ]; then
+              DIAG="TIMEOUT after ${ELAPSED}s (curl -m ${CURL_TIMEOUT}). The gateway was reachable; the model did not answer in time. This is model/gateway latency, NOT diff size — the diff is truncated to diff_budget before the model sees it, so shrinking diff_budget will not help and truncating hard produces confident false blockers. Raise curl_timeout_secs, and timeout_minutes with it (the cap is derived as timeout_minutes*60-60 so it stays inside the job budget)."
+            elif [ "$HTTP_CODE" = "000" ]; then
+              DIAG="TRANSPORT FAILURE after ${ELAPSED}s (DNS, connection refused, or reset) — the gateway was NOT reached. Check egress/NetworkPolicy from this runner to ${LITELLM_URL}."
+            else
+              DIAG="gateway answered HTTP ${HTTP_CODE}"
+            fi
+            echo "failure_diagnosis=${DIAG}" >> "$GITHUB_OUTPUT"
+            echo "GLM review request failed: ${DIAG} Model: ${JURY_MODEL}. URL: ${LITELLM_URL}. Body (first 500 bytes): $(head -c 500 /tmp/glm-response.json 2>/dev/null)" >&2
             exit 0
           fi
 
