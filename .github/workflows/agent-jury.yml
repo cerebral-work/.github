@@ -91,9 +91,20 @@ on:
         type: string
         default: self-hosted
       model:
-        description: Model for substantial diffs.
+        description: >-
+          Model for substantial diffs. Defaults to glm-5.2-FAST (thinking
+          disabled): the reasoning variant glm-5.2 bills reasoning_content
+          against the completion ceiling and, on substantial diffs, either
+          burns the ceiling before emitting the review or runs long enough to
+          exceed the job's curl budget — which is what kept the estate CI jury
+          red. The CI gate wants a deterministic verdict; the deep
+          reasoning-model pass is the local multi-judge agent-jury panel, not
+          this check. Measured completion tokens (2026-08-23, 6 real PR diffs):
+          glm-5.2-fast mean 619 / max 736; reasoning glm-5.2 mean 8619 / max
+          14256. Override to a reasoning model only alongside a matching
+          max_tokens raise.
         type: string
-        default: glm-5.2
+        default: glm-5.2-fast
       fast_model:
         description: Model for small or non-Rust diffs.
         type: string
@@ -273,12 +284,18 @@ jobs:
           HAS_RUST=$(echo "$FILES_CHANGED" | grep -c '\.rs$' || true)
           DIFF_LINES=$(echo "$DIFF" | wc -l)
 
+          # Ceiling is 64000 for both lanes: substantial headroom (~4.5x the
+          # measured reasoning-model max of 14256, ~87x the fast-model max of
+          # 736) so a per-repo reasoning-model override completes instead of
+          # truncating, while fast-model runs use a small fraction of it. The
+          # old 1000000 full-lane ceiling let a reasoning model run long enough
+          # to blow the curl budget; 4096 could truncate a large fast review.
           if [ "$HAS_RUST" -gt 0 ] && [ "$DIFF_LINES" -gt 50 ]; then
             JURY_MODEL="$JURY_MODEL_FULL"
-            MAX_TOKENS=1000000
+            MAX_TOKENS=64000
           else
             JURY_MODEL="$JURY_MODEL_FAST"
-            MAX_TOKENS=4096
+            MAX_TOKENS=64000
           fi
           echo "Using model=$JURY_MODEL max_tokens=$MAX_TOKENS (rust=$HAS_RUST lines=$DIFF_LINES)" >&2
           echo "model_used=$JURY_MODEL" >> "$GITHUB_OUTPUT"
