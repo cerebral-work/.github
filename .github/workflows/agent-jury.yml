@@ -64,6 +64,22 @@ name: Agent Jury (reusable)
 # Any branch protection naming the old bare `GLM-5.2 code review` must be
 # updated to the prefixed form.
 
+# Supersede in-flight runs for the same PR. WITHOUT THIS the jury piles up:
+# every push to a PR leaves the previous run QUEUED forever, and on a
+# scale-to-zero ARC pool those stale runs starve the pool for everyone.
+#
+# Measured 2026-08-16, which is why this exists: cerebral-work/terrarium had 6
+# and cerebral-work/linearctl 7 queued jury runs across FIVE branches each,
+# most belonging to other people's PRs. The oldest had been queued ~20 hours.
+# Three of them were superseded commits of a single branch that had been pushed
+# three times. Nothing was broken — the queue was simply unbounded.
+#
+# github.ref is per-PR for pull_request events, so this cancels only older runs
+# of the SAME pull request, never a different one.
+concurrency:
+  group: agent-jury-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 on:
   workflow_call:
     inputs:
@@ -90,6 +106,22 @@ on:
           AutoscalingRunnerSet CRs instead.
         type: string
         default: self-hosted
+      verdict_runner:
+        description: >-
+          Runner for the tiny `verdict` job, which only reads an output and
+          exits — no network, no secrets, no cluster access.
+
+          Defaults to ubuntu-latest ON PURPOSE. It used to inherit `runner`,
+          which meant every jury run consumed TWO self-hosted slots to do one
+          review, doubling demand on pools that are already the bottleneck
+          (cerebral-work's reverie pool is max 3 and was running one runner
+          while jury jobs queued for hours). A GitHub-hosted minute is a better
+          trade than a slot in a starved pool.
+
+          Override to `${{ inputs.runner }}`-style only if a repo cannot use
+          GitHub-hosted runners at all.
+        type: string
+        default: ubuntu-latest
       model:
         description: >-
           Model for substantial diffs. Defaults to glm-5.2-FAST (thinking
@@ -648,7 +680,9 @@ jobs:
     # out of the way rather than jamming it Pending.
     name: GLM-5.2 code review
     needs: review
-    runs-on: ${{ inputs.runner }}
+    # NOT inputs.runner — see the verdict_runner input. This job reads one
+    # output and exits; it does not need the self-hosted pool.
+    runs-on: ${{ inputs.verdict_runner }}
     timeout-minutes: 5
     steps:
       # Verdict taxonomy (operator ruling 2026-08-04, OPS-1126): ONLY a clean
