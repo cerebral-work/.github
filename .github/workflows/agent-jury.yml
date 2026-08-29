@@ -38,11 +38,27 @@ name: Agent Jury (reusable)
 #   jobs:
 #     jury:
 #       uses: cerebral-work/.github/.github/workflows/agent-jury.yml@v1
-#       secrets: inherit
+#       secrets:
+#         AGENT_JURY_API_KEY: ${{ secrets.AGENT_JURY_API_KEY }}
 #
-# THE CREDENTIAL, AND WHY IT IS NOT UNIFORM.
+# DO NOT WRITE `secrets: inherit` HERE. This workflow lives in the
+# cerebral-work org, and `inherit` DOES NOT CROSS ORGANIZATIONS: a caller in
+# unsigned-gg receives an EMPTY secret and the gateway answers
+# 401 "Authentication Error, No api key passed in". It fails silently in the
+# sense that nothing says "wrong org" — it just looks like a bad key.
 #
-# `secrets: inherit` passes AGENT_JURY_API_KEY through. Where that key has to
+# Measured 2026-08-16 with the identical caller in four repos:
+#   cerebral-work/cortex  #65   -> verdict delivered (same org)
+#   cerebral-work/reverie #1671 -> verdict delivered (same org)
+#   unsigned-gg/vilicus   #21   -> 401, key empty   (cross-org)
+#   unsigned-gg/soma      #98   -> 401, key empty   (cross-org)
+#
+# Explicit passing works in both directions, so every caller uses it and there
+# is only one caller shape to remember.
+#
+# THE CREDENTIAL, AND WHY ITS HOME IS NOT UNIFORM.
+#
+# Where the key has to
 # LIVE depends on the calling repo's visibility, because both orgs are on the
 # GitHub Free plan:
 #
