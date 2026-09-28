@@ -279,6 +279,29 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Never leave the always() comment step with missing failure outputs.
+          # Log only a fixed stage and exit status, never BASH_COMMAND (keys).
+          REVIEW_STAGE="prepare prompt"
+          REQUEST_DIR=""
+          fail_review() {
+            echo "review_failed=true" >> "$GITHUB_OUTPUT"
+            echo "failure_reason=${REVIEW_STAGE} failed (exit $1)" >> "$GITHUB_OUTPUT"
+            echo "GLM review: ${REVIEW_STAGE} failed (exit $1)" >&2
+          }
+          review_exit() {
+            local status=$?
+            trap - EXIT
+            if [ "$status" -ne 0 ]; then
+              fail_review "$status"
+            fi
+            if [ -n "$REQUEST_DIR" ]; then
+              rm -rf -- "$REQUEST_DIR"
+            fi
+            # Match the existing transport failure tier: comment + delivery gate.
+            exit 0
+          }
+          trap review_exit EXIT
+
           DIFF=$(cat /tmp/pr-diff.txt)
 
           HAS_RUST=$(echo "$FILES_CHANGED" | grep -c '\.rs$' || true)
@@ -321,11 +344,23 @@ jobs:
 
           Trivial diffs (deps, fmt, docs): {\"verdict\":\"approved\",\"confidence\":\"high\",\"findings\":[],\"summary\":\"No logic changes.\"}"
 
-          REQUEST_BODY=$(jq -nc \
+          REVIEW_STAGE="request build"
+          REQUEST_DIR=$(mktemp -d "${RUNNER_TEMP:-/tmp}/agent-jury-request.XXXXXX")
+          printf '%s' "$REVIEW_PROMPT" > "$REQUEST_DIR/prompt.txt"
+          # Keep prompt/body out of argv, including the curl hop. jq stderr
+          # stays visible; the failure output itself contains no untrusted text.
+          if jq -nc \
             --arg model "$JURY_MODEL" \
-            --arg prompt "$REVIEW_PROMPT" \
+            --rawfile prompt "$REQUEST_DIR/prompt.txt" \
             --argjson max_tokens "$MAX_TOKENS" \
-            '{model: $model, messages: [{role: "user", content: $prompt}], temperature: 0.2, max_tokens: $max_tokens}')
+            '{model: $model, messages: [{role: "user", content: $prompt}], temperature: 0.2, max_tokens: $max_tokens}' \
+            > "$REQUEST_DIR/request.json"; then
+            :
+          else
+            fail_review "$?"
+            exit 0
+          fi
+          REVIEW_STAGE="request transport"
 
           # `-s` and NOT `-sf` on purpose. With `-f`, curl prints nothing on an
           # HTTP error, so the response came back EMPTY and the log line read
@@ -408,7 +443,7 @@ jobs:
           else
             echo "No gateway key from either source (Actions secret or runner env)." >&2
           fi
-          CURL_ARGS+=(-d "$REQUEST_BODY")
+          CURL_ARGS+=(--data-binary "@$REQUEST_DIR/request.json")
 
           REQUEST_STARTED=$(date +%s)
           HTTP_CODE=$(curl "${CURL_ARGS[@]}" \
@@ -442,10 +477,11 @@ jobs:
             exit 0
           fi
 
-          CONTENT=$(echo "$RESPONSE" | jq -r '
+          REVIEW_STAGE="response decode"
+          CONTENT=$(printf '%s\n' "$RESPONSE" | jq -r '
             .choices[0].message.content //
             .choices[0].message.reasoning_content //
-            empty' 2>/dev/null)
+            empty')
 
           if [ -z "$CONTENT" ] || [ "$CONTENT" = "null" ]; then
             echo "review_failed=true" >> "$GITHUB_OUTPUT"
@@ -454,7 +490,8 @@ jobs:
             exit 0
           fi
 
-          CLEAN=$(echo "$CONTENT" | sed 's/^```json//; s/^```//; s/```$//' | jq '.' 2>/dev/null)
+          REVIEW_STAGE="completion JSON parse"
+          CLEAN=$(printf '%s\n' "$CONTENT" | sed 's/^```json//; s/^```//; s/```$//' | jq '.')
 
           if [ -z "$CLEAN" ]; then
             echo "review_failed=true" >> "$GITHUB_OUTPUT"
@@ -463,6 +500,7 @@ jobs:
             exit 0
           fi
 
+          REVIEW_STAGE="verdict fields"
           VERDICT=$(echo "$CLEAN" | jq -r '.verdict // "needs-changes"')
           CONFIDENCE=$(echo "$CLEAN" | jq -r '.confidence // "low"')
           FINDINGS_COUNT=$(echo "$CLEAN" | jq '.findings | length')
@@ -530,7 +568,7 @@ jobs:
             LABEL="agent-jury-error"
             BODY="## 🤖 Agent Jury — ⚠️ error (review not delivered)
 
-            The GLM-5.2 review could not complete (gateway error, empty response,
+            The GLM-5.2 review could not complete (request-build error, gateway error, empty response,
             or unparseable JSON). **This is not a finding against the diff** — the
             reviewer never returned a verdict. Manual review required.
 
@@ -603,7 +641,7 @@ jobs:
           echo "Agent jury verdict: ${VERDICT:-none} (label: $LABEL)"
 
       # ERROR TIER. Reds this job — and ONLY this job — when the review pipeline
-      # broke. The three failure paths in "Run GLM-5.2 review" all still `exit 0`
+      # broke. The failure paths in "Run GLM-5.2 review" all still `exit 0`
       # so that the comment and label above are posted first; this step is what
       # converts `review_failed` into a check state instead of discarding it.
       #
