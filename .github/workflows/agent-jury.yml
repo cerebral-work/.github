@@ -37,7 +37,8 @@ name: Agent Jury (reusable)
 #     pull-requests: write
 #   jobs:
 #     jury:
-#       uses: cerebral-work/.github/.github/workflows/agent-jury.yml@v1
+#       # Pin the released commit by SHA (current release: v1.1.0).
+#       uses: cerebral-work/.github/.github/workflows/agent-jury.yml@c6567996e98d6c2228262646749821ce4f6522cd # v1.1.0
 #       secrets: inherit
 #
 # THE CREDENTIAL, AND WHY IT IS NOT UNIFORM.
