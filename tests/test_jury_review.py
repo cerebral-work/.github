@@ -158,3 +158,94 @@ if args[-1].endswith('/labels') and '-d' in args:
         self.assertIn('completion JSON parse failed', outputs['failure_reason'])
         self.assertIn('parse error', proc.stderr)
         self.assertNotIn('verdict', outputs)
+
+
+FAKE_GITHUB = """#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+args = sys.argv[1:]
+url = args[-1]
+method = args[args.index('-X') + 1] if '-X' in args else 'GET'
+calls = Path(os.environ['CALLS_OUT'])
+log = json.loads(calls.read_text()) if calls.exists() else []
+body = sys.stdin.read() if '@-' in args else None
+log.append({'method': method, 'url': url, 'body': body})
+calls.write_text(json.dumps(log))
+if method == 'GET' and '/comments?' in url:
+    page = int(url.rsplit('page=', 1)[1])
+    pages = json.loads(os.environ['COMMENT_PAGES'])
+    print(json.dumps(pages[page - 1] if page <= len(pages) else []))
+"""
+
+
+class StickyComment(unittest.TestCase):
+    """The jury keeps ONE comment per PR and edits it, instead of piling up."""
+
+    def post(self, pages, verdict='approved', sha='abcdef1234567890'):
+        workflow = yaml.safe_load(WORKFLOW.read_text())
+        steps = [s for j in workflow['jobs'].values() for s in j.get('steps', [])]
+        script = next(s['run'] for s in steps if s.get('name') == 'Post review comment + stamp label')
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            parsed = root / 'jury-parsed.json'
+            parsed.write_text(json.dumps({'verdict': verdict, 'summary': 'fixture summary', 'findings': []}))
+            script = script.replace('/tmp/jury-parsed.json', str(parsed))
+            (root / 'curl').write_text(FAKE_GITHUB)
+            (root / 'curl').chmod(0o755)
+            env = dict(os.environ, PATH=temp + os.pathsep + os.environ['PATH'],
+                       GH_TOKEN='fixture', PR_NUMBER='7', REPO='fixture/repo', MODEL='glm',
+                       VERDICT=verdict, CONFIDENCE='high', FINDINGS_COUNT='0',
+                       REVIEW_FAILED='', FAILURE_REASON='', HEAD_SHA=sha, GITHUB_RUN_ID='42',
+                       CALLS_OUT=str(root / 'calls.json'), COMMENT_PAGES=json.dumps(pages))
+            proc = subprocess.run(['bash', '-e', '-c', script], env=env, capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            calls = json.loads((root / 'calls.json').read_text())
+        writes = [c for c in calls if c['method'] in ('POST', 'PATCH') and 'comments' in c['url']]
+        self.assertEqual(len(writes), 1, writes)
+        return writes[0], json.loads(writes[0]['body'])['body']
+
+    def test_first_run_posts_one_marked_comment(self):
+        write, body = self.post([[]])
+        self.assertEqual(write['method'], 'POST')
+        self.assertTrue(write['url'].endswith('/issues/7/comments'))
+        self.assertIn('<!-- agent-jury:sticky -->', body)
+        self.assertIn('`abcdef12`', body)
+        self.assertIn('✅ approved', body)
+        self.assertIn('/fixture/repo/actions/runs/42', body)
+
+    def test_rerun_patches_existing_and_keeps_log(self):
+        _, first = self.post([[]], verdict='needs-changes', sha='1111111199999999')
+        bot = {'login': 'github-actions[bot]'}
+        pages = [[{'id': 5, 'user': {'login': 'someone'}, 'body': 'lgtm'}],
+                 [{'id': 99, 'user': bot, 'body': first}]]
+        write, body = self.post(pages, verdict='approved', sha='2222222288888888')
+        self.assertEqual(write['method'], 'PATCH')
+        self.assertTrue(write['url'].endswith('/issues/comments/99'))
+        self.assertIn('## 🤖 Agent Jury — ✅ approved', body)
+        self.assertNotIn('## 🤖 Agent Jury — 🟠', body)
+        log = body.split('<!-- agent-jury:log -->')[1].split('<!-- /agent-jury:log -->')[0]
+        lines = [l for l in log.splitlines() if l.strip()]
+        self.assertEqual(len(lines), 2)
+        self.assertIn('`11111111`', lines[0])
+        self.assertIn('🟠 needs-changes', lines[0])
+        self.assertIn('`22222222`', lines[1])
+
+    def test_adopts_newest_legacy_comment_instead_of_adding(self):
+        bot = {'login': 'github-actions[bot]'}
+        pages = [[{'id': 1, 'user': bot, 'body': '## 🤖 Agent Jury — ⚠️ error (review not delivered)\n...'},
+                  {'id': 2, 'user': bot, 'body': '## 🤖 Agent Jury — 🟠 needs-changes\n...'},
+                  {'id': 3, 'user': {'login': 'mallory'}, 'body': '## 🤖 Agent Jury — ✅ approved'}]]
+        write, body = self.post(pages)
+        self.assertEqual(write['method'], 'PATCH')
+        self.assertTrue(write['url'].endswith('/issues/comments/2'))
+        self.assertIn('- earlier: 🟠 needs-changes (before run log)', body)
+
+    def test_log_is_capped(self):
+        bot = {'login': 'github-actions[bot]'}
+        old = '\n'.join(f'- `{i:08d}` · t · ✅ approved · [run](x)' for i in range(30))
+        prior = f'## 🤖 Agent Jury — ✅ approved\n<!-- agent-jury:log -->\n{old}\n<!-- /agent-jury:log -->\n<!-- agent-jury:sticky -->'
+        _, body = self.post([[{'id': 8, 'user': bot, 'body': prior}]])
+        log = body.split('<!-- agent-jury:log -->')[1].split('<!-- /agent-jury:log -->')[0]
+        lines = [l for l in log.splitlines() if l.strip()]
+        self.assertEqual(len(lines), 20)
+        self.assertIn('`abcdef12`', lines[-1])

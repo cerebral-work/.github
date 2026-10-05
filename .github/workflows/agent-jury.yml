@@ -549,6 +549,7 @@ jobs:
           REVIEW_FAILED: ${{ steps.review.outputs.review_failed }}
           FAILURE_REASON: ${{ steps.review.outputs.failure_reason }}
           MODEL: ${{ steps.review.outputs.model_used }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
           API="https://api.github.com/repos/$REPO"
@@ -566,6 +567,7 @@ jobs:
             # `needs-changes` label, and a comment saying the review could not
             # complete. Three surfaces, three different stories.
             LABEL="agent-jury-error"
+            LOG_VERDICT="⚠️ error"
             BODY="## 🤖 Agent Jury — ⚠️ error (review not delivered)
 
             The GLM-5.2 review could not complete (request-build error, gateway error, empty response,
@@ -610,6 +612,7 @@ jobs:
             ')
 
             SUMMARY=$(echo "$JURY_JSON" | jq -r '.summary // "No summary provided"')
+            LOG_VERDICT="${EMOJI} ${VERDICT}"
 
             BODY="## 🤖 Agent Jury — ${EMOJI} ${VERDICT}
 
@@ -631,9 +634,60 @@ jobs:
             "
           fi
 
-          echo "$(jq -nc --arg b "$BODY" '{body: $b}')" | \
-            curl -sf -X POST -H "$AUTH" -H "$ACCEPT" -d @- \
-            "$API/issues/$PR_NUMBER/comments" 2>/dev/null || true
+          # ONE jury comment per PR, edited in place. This step used to POST a
+          # new comment on every run (each push, each re-run) and never touch the
+          # old ones, so verdicts piled up and a stale one could sit above the
+          # current one — reverie#2013 showed `needs-changes` above the later
+          # `approved`. Now: find our marker-keyed comment and PATCH it; on the
+          # first run after this change, adopt the newest legacy jury comment
+          # instead of adding another. History survives as a capped run log
+          # (sha · time · verdict · run link) inside the comment.
+          MARKER='<!-- agent-jury:sticky -->'
+          LOG_START='<!-- agent-jury:log -->'
+          LOG_END='<!-- /agent-jury:log -->'
+          LOG_KEEP=20
+          RUN_URL="${GITHUB_SERVER_URL:-https://github.com}/${REPO}/actions/runs/${GITHUB_RUN_ID:-0}"
+
+          EXISTING='[]'
+          page=1
+          while [ "$page" -le 30 ]; do
+            PAGE_JSON=$(curl -sf -H "$AUTH" -H "$ACCEPT" \
+              "$API/issues/$PR_NUMBER/comments?per_page=100&page=$page" 2>/dev/null || true)
+            echo "$PAGE_JSON" | jq -e 'type == "array" and length > 0' >/dev/null 2>&1 || break
+            EXISTING=$(jq -cn --argjson a "$EXISTING" --argjson b "$PAGE_JSON" '$a + $b')
+            page=$((page + 1))
+          done
+
+          STICKY=$(echo "$EXISTING" | jq -c --arg m "$MARKER" '
+            [.[] | select(.user.login == "github-actions[bot]")] as $mine
+            | ([$mine[] | select(.body | contains($m))] | last)
+              // ([$mine[] | select(.body | startswith("## 🤖 Agent Jury"))] | last)
+              // empty')
+          STICKY_ID=$(echo "$STICKY" | jq -r '.id // empty')
+          OLD_LOG=$(echo "$STICKY" | jq -r --arg m "$MARKER" --arg s "$LOG_START" --arg e "$LOG_END" '
+            (.body // "") as $b
+            | if ($b | contains($s)) then ($b | split($s)[1] | split($e)[0])
+              elif ($b | length) > 0 and ($b | contains($m) | not) then
+                "- earlier: " + ($b | split("\n")[0] | ltrimstr("## 🤖 Agent Jury — ")) + " (before run log)"
+              else "" end')
+
+          SHA_SHORT="${HEAD_SHA:-unknown}"
+          NEW_LINE="- \`${SHA_SHORT:0:8}\` · $(date -u +%Y-%m-%dT%H:%MZ) · ${LOG_VERDICT} · [run](${RUN_URL})"
+          RUN_LOG=$( { printf '%s\n' "$OLD_LOG"; printf '%s\n' "$NEW_LINE"; } | awk 'NF' | tail -n "$LOG_KEEP")
+
+          FULL=$(printf '%s\n\n### Run log\n_Newest last; this comment is updated in place on every run._\n\n%s\n%s\n%s\n\n%s\n' \
+            "$BODY" "$LOG_START" "$RUN_LOG" "$LOG_END" "$MARKER")
+          PAYLOAD=$(jq -nc --arg b "$FULL" '{body: $b}')
+
+          if [ -n "$STICKY_ID" ]; then
+            echo "$PAYLOAD" | curl -sf -X PATCH -H "$AUTH" -H "$ACCEPT" -d @- \
+              "$API/issues/comments/$STICKY_ID" >/dev/null 2>&1 \
+              || { echo "::warning::could not update jury comment $STICKY_ID; posting a new one"; STICKY_ID=; }
+          fi
+          if [ -z "$STICKY_ID" ]; then
+            echo "$PAYLOAD" | curl -sf -X POST -H "$AUTH" -H "$ACCEPT" -d @- \
+              "$API/issues/$PR_NUMBER/comments" >/dev/null 2>&1 || true
+          fi
 
           curl -sf -X POST -H "$AUTH" -H "$ACCEPT" \
             -d "{\"labels\":[\"$LABEL\"]}" \
