@@ -37,13 +37,21 @@ name: Agent Jury (reusable)
 #     pull-requests: write
 #   jobs:
 #     jury:
-#       # Pin the released commit by SHA (current release: v1.1.0).
-#       uses: cerebral-work/.github/.github/workflows/agent-jury.yml@c6567996e98d6c2228262646749821ce4f6522cd # v1.1.0
-#       secrets: inherit
+#       # Pin the released commit by SHA (current release: v1.1.1).
+#       uses: cerebral-work/.github/.github/workflows/agent-jury.yml@a868a09b27976af8239cd295a6937c966f6b1f91 # v1.1.1
+#       with:
+#         # Optional; without these, a repo's AGENT_JURY_API_URL / AGENT_JURY_MODEL
+#         # variables have no effect (the reusable workflow cannot read them).
+#         api_url: ${{ vars.AGENT_JURY_API_URL }}
+#         model: ${{ vars.AGENT_JURY_MODEL }}
+#       # Pass the one secret by name. `secrets: inherit` also works, but it hands
+#       # the called workflow every secret the caller can read (rina#6, 2026-10-06).
+#       secrets:
+#         AGENT_JURY_API_KEY: ${{ secrets.AGENT_JURY_API_KEY }}
 #
 # THE CREDENTIAL, AND WHY IT IS NOT UNIFORM.
 #
-# `secrets: inherit` passes AGENT_JURY_API_KEY through. Where that key has to
+# The caller passes AGENT_JURY_API_KEY by name (above). Where that key has to
 # LIVE depends on the calling repo's visibility, because both orgs are on the
 # GitHub Free plan:
 #
@@ -138,7 +146,7 @@ on:
       AGENT_JURY_API_KEY:
         description: >-
           LiteLLM gateway key. Set ONCE as an org-level secret per org
-          (visibility all) and reach it with `secrets: inherit`. Do not
+          (visibility all) and pass it by name from the caller. Do not
           re-add it as a repo secret — a repo secret shadows the org one and
           recreates the twenty-six-copy rotation problem this file exists to
           end.
@@ -444,7 +452,10 @@ jobs:
           fi
           CURL_ARGS=(-s -m "$CURL_TIMEOUT" -X POST -H "Content-Type: application/json")
           if [ -n "$KEY" ]; then
-            CURL_ARGS+=(-H "Authorization: Bearer $KEY")
+            # Keep the key off curl's argv (visible in /proc/<pid>/cmdline): a
+            # 0600 header file inside REQUEST_DIR, which the EXIT trap removes.
+            ( umask 077; printf 'Authorization: Bearer %s\n' "$KEY" > "$REQUEST_DIR/auth.header" )
+            CURL_ARGS+=(-H "@$REQUEST_DIR/auth.header")
           else
             echo "No gateway key from either source (Actions secret or runner env)." >&2
           fi
