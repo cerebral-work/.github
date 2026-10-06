@@ -556,8 +556,33 @@ jobs:
           AUTH="Authorization: Bearer $GH_TOKEN"
           ACCEPT="Accept: application/vnd.github+json"
 
+          # CER-2088: every GitHub write reports its HTTP status. A failed write
+          # used to vanish behind `curl -sf ... 2>/dev/null || true`, so a PR
+          # carried no jury label and nothing said why. Now it warns in the run
+          # log. It never fails this job: the delivery and verdict gates below
+          # own the check state, and a label is advisory.
+          # Usage: api_call <what> <expected codes...> -- <curl args...> <url>
+          api_call() {
+            local what="$1"; shift
+            local expected=()
+            while [ "$1" != "--" ]; do expected+=("$1"); shift; done
+            shift
+            local out code ok=false
+            out=$(mktemp)
+            code=$(curl -s -o "$out" -w '%{http_code}' "$@") || code="curl exit $?"
+            for e in "${expected[@]}"; do
+              [ "$code" = "$e" ] && ok=true
+            done
+            if [ "$ok" != true ]; then
+              echo "::warning::agent jury: ${what} failed (HTTP ${code:-none}): $(head -c 300 "$out" | tr '\n' ' ')"
+            fi
+            rm -f "$out"
+          }
+
+          # 404 = the label was not on the PR, which is the normal case.
           for lbl in agent-jury-approved agent-jury-needs-changes agent-jury-changes-requested agent-jury-error; do
-            curl -sf -X DELETE -H "$AUTH" -H "$ACCEPT" "$API/issues/$PR_NUMBER/labels/$lbl" 2>/dev/null || true
+            api_call "remove label $lbl" 200 404 -- -X DELETE -H "$AUTH" -H "$ACCEPT" \
+              "$API/issues/$PR_NUMBER/labels/$lbl"
           done
 
           if [ "${REVIEW_FAILED:-}" = "true" ]; then
@@ -632,14 +657,23 @@ jobs:
             "
           fi
 
-          echo "$(jq -nc --arg b "$BODY" '{body: $b}')" | \
-            curl -sf -X POST -H "$AUTH" -H "$ACCEPT" -d @- \
-            "$API/issues/$PR_NUMBER/comments" 2>/dev/null || true
+          jq -nc --arg b "$BODY" '{body: $b}' > "$RUNNER_TEMP/jury-comment.json"
+          api_call "post review comment" 201 -- -X POST -H "$AUTH" -H "$ACCEPT" \
+            --data-binary @"$RUNNER_TEMP/jury-comment.json" \
+            "$API/issues/$PR_NUMBER/comments"
 
-          curl -sf -X POST -H "$AUTH" -H "$ACCEPT" \
+          api_call "stamp label $LABEL" 200 -- -X POST -H "$AUTH" -H "$ACCEPT" \
             -d "{\"labels\":[\"$LABEL\"]}" \
-            "$API/issues/$PR_NUMBER/labels" 2>/dev/null || true
-          echo "Agent jury verdict: ${VERDICT:-none} (label: $LABEL)"
+            "$API/issues/$PR_NUMBER/labels"
+
+          # Read the labels back by a separate call. The POST returning 200 is a
+          # claim about the call, not proof that the PR carries the label.
+          ON_PR=$(curl -s -H "$AUTH" -H "$ACCEPT" "$API/issues/$PR_NUMBER/labels?per_page=100" \
+            | jq -r '[.[]?.name | select(startswith("agent-jury-"))] | join(",")' 2>/dev/null || true)
+          if [ "$ON_PR" != "$LABEL" ]; then
+            echo "::warning::agent jury: expected exactly label $LABEL on the PR, found '${ON_PR:-none}'. If the label does not exist in this repo, create it once: gh label create $LABEL --repo $REPO"
+          fi
+          echo "Agent jury verdict: ${VERDICT:-none} (label: $LABEL; on PR: ${ON_PR:-none})"
 
       # ERROR TIER. Reds this job — and ONLY this job — when the review pipeline
       # broke. The failure paths in "Run GLM-5.2 review" all still `exit 0`
