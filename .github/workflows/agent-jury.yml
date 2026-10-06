@@ -240,17 +240,21 @@ jobs:
           DIFF_LINES=$(echo "$DIFF" | wc -l)
           FILES_CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD 2>/dev/null || echo "unknown")
 
+          # Random delimiter: the body (and file names) are attacker text, and a line equal
+          # to a fixed `EOF` closed the block early, so the lines after it were parsed as
+          # extra outputs of this step (reported by the rina lane 2026-10-06; rina#5 pattern).
+          DELIM="JURY_$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')"
           {
             echo "number=$PR_NUMBER"
-            echo "title<<EOF"
-            echo "$PR_TITLE"
-            echo "EOF"
-            echo "body<<EOF"
-            echo "$PR_BODY"
-            echo "EOF"
-            echo "files<<EOF"
-            echo "$FILES_CHANGED"
-            echo "EOF"
+            echo "title<<$DELIM"
+            printf '%s\n' "$PR_TITLE"
+            echo "$DELIM"
+            echo "body<<$DELIM"
+            printf '%s\n' "$PR_BODY"
+            echo "$DELIM"
+            echo "files<<$DELIM"
+            printf '%s\n' "$FILES_CHANGED"
+            echo "$DELIM"
             echo "diff_lines=$DIFF_LINES"
             echo "diff_note=$DIFF_NOTE"
           } >> "$GITHUB_OUTPUT"
