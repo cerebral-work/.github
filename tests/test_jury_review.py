@@ -117,39 +117,116 @@ exec "''' + shutil.which('jq') + '''" "$@"
         self.assertEqual(outputs['failure_reason'], 'HTTP 503')
         self.assertNotIn('verdict', outputs)
 
-    def test_build_failure_reaches_comment_and_red_delivery_gate(self):
-        _, outputs, _, _ = self.run_review(jq_failure=True)
+    def run_comment_step(self, outputs, *, label_code='200', labels_after=None, verdict='',
+                         parsed=None):
+        """Run the comment+label step against a fake GitHub API.
+
+        The fake records each write, answers `-w '%{http_code}'` like real curl,
+        and serves a label list for the read-back GET.
+        """
         workflow = yaml.safe_load(WORKFLOW.read_text())
         steps = [s for j in workflow['jobs'].values() for s in j.get('steps', [])]
         comment = next(s['run'] for s in steps if s.get('name') == 'Post review comment + stamp label')
-        gate = next(s['run'] for s in steps if s.get('name') == 'Fail when the review was not delivered')
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            comment = comment.replace('/tmp/jury-parsed.json', str(root / 'absent-verdict.json'))
-            (root / 'curl').write_text("""#!/usr/bin/env python3
+        temp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, temp)
+        root = Path(temp)
+        verdict_file = root / 'verdict.json'
+        if parsed is not None:
+            verdict_file.write_text(json.dumps(parsed))
+        comment = comment.replace('/tmp/jury-parsed.json', str(verdict_file))
+        (root / 'curl').write_text("""#!/usr/bin/env python3
 import json, os, sys
 from pathlib import Path
 args = sys.argv[1:]
-if args[-1].endswith('/comments'):
-    Path(os.environ['COMMENT_OUT']).write_text(sys.stdin.read())
-if args[-1].endswith('/labels') and '-d' in args:
-    Path(os.environ['LABEL_OUT']).write_text(args[args.index('-d') + 1])
+url = args[-1]
+method = args[args.index('-X') + 1] if '-X' in args else 'GET'
+root = Path(os.environ['FIXTURE_ROOT'])
+with open(root / 'calls', 'a') as f:
+    f.write(method + ' ' + url + '\\n')
+out = Path(args[args.index('-o') + 1]) if '-o' in args else None
+body, code = '{}', '200'
+if method == 'POST' and url.endswith('/comments'):
+    src = args[args.index('--data-binary') + 1]
+    (root / 'comment').write_text(Path(src[1:]).read_text())
+    code = '201'
+elif method == 'POST' and url.endswith('/labels'):
+    (root / 'label').write_text(args[args.index('-d') + 1])
+    code = os.environ['FIXTURE_LABEL_CODE']
+    if code != '200':
+        body = '{"message":"Label does not exist"}'
+elif method == 'DELETE':
+    code = '404'
+elif method == 'GET' and '/labels' in url:
+    body = os.environ['FIXTURE_LABELS_AFTER']
+if out is not None:
+    out.write_text(body)
+else:
+    sys.stdout.write(body)
+if '-w' in args:
+    sys.stdout.write(code)
 """)
-            (root / 'curl').chmod(0o755)
-            env = dict(os.environ, PATH=temp + os.pathsep + os.environ['PATH'],
-                       GH_TOKEN='fixture', PR_NUMBER='1', REPO='fixture/repo', MODEL='full',
-                       VERDICT='', CONFIDENCE='', FINDINGS_COUNT='',
-                       REVIEW_FAILED=outputs.get('review_failed', ''),
-                       FAILURE_REASON=outputs.get('failure_reason', ''),
-                       COMMENT_OUT=str(root / 'comment'), LABEL_OUT=str(root / 'label'))
-            proc = subprocess.run(['bash', '-e', '-c', comment], env=env, capture_output=True, text=True)
-            self.assertEqual(proc.returncode, 0, proc.stderr)
-            body = json.loads((root / 'comment').read_text())['body']
-            self.assertIn('request build failed (exit 5)', body)
-            self.assertEqual(json.loads((root / 'label').read_text()), {'labels': ['agent-jury-error']})
-            proc = subprocess.run(['bash', '-e', '-c', gate], env=env, capture_output=True, text=True)
-            self.assertEqual(proc.returncode, 1)
-            self.assertIn('request build failed (exit 5)', proc.stdout)
+        (root / 'curl').chmod(0o755)
+        if labels_after is None:
+            labels_after = []
+        env = dict(os.environ, PATH=temp + os.pathsep + os.environ['PATH'],
+                   FIXTURE_ROOT=temp, RUNNER_TEMP=temp,
+                   FIXTURE_LABEL_CODE=label_code,
+                   FIXTURE_LABELS_AFTER=json.dumps([{'name': n} for n in labels_after]),
+                   GH_TOKEN='fixture', PR_NUMBER='1', REPO='fixture/repo', MODEL='full',
+                   VERDICT=verdict, CONFIDENCE='high' if verdict else '',
+                   FINDINGS_COUNT='0' if verdict else '',
+                   REVIEW_FAILED=outputs.get('review_failed', ''),
+                   FAILURE_REASON=outputs.get('failure_reason', ''))
+        proc = subprocess.run(['bash', '-e', '-c', comment], env=env, capture_output=True, text=True)
+        return proc, root
+
+    def test_build_failure_reaches_comment_and_red_delivery_gate(self):
+        _, outputs, _, _ = self.run_review(jq_failure=True)
+        proc, root = self.run_comment_step(outputs, labels_after=['agent-jury-error'])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        body = json.loads((root / 'comment').read_text())['body']
+        self.assertIn('request build failed (exit 5)', body)
+        self.assertEqual(json.loads((root / 'label').read_text()), {'labels': ['agent-jury-error']})
+        self.assertNotIn('::warning::', proc.stdout)
+        workflow = yaml.safe_load(WORKFLOW.read_text())
+        steps = [s for j in workflow['jobs'].values() for s in j.get('steps', [])]
+        gate = next(s['run'] for s in steps if s.get('name') == 'Fail when the review was not delivered')
+        env = dict(os.environ, FAILURE_REASON=outputs.get('failure_reason', ''))
+        proc = subprocess.run(['bash', '-e', '-c', gate], env=env, capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn('request build failed (exit 5)', proc.stdout)
+
+    def test_missing_label_warns_instead_of_vanishing(self):
+        # CER-2088: the repo lacks the label, so GitHub answers 422 and the PR
+        # ends up unlabelled. That must show in the run log, not disappear.
+        proc, root = self.run_comment_step(
+            {}, label_code='422', labels_after=[], verdict='changes-requested',
+            parsed={'verdict': 'changes-requested', 'findings': [], 'summary': 's'})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn('::warning::agent jury: stamp label agent-jury-changes-requested failed (HTTP 422)',
+                      proc.stdout)
+        self.assertIn('Label does not exist', proc.stdout)
+        self.assertIn("expected exactly label agent-jury-changes-requested on the PR, found 'none'",
+                      proc.stdout)
+        self.assertIn('gh label create agent-jury-changes-requested', proc.stdout)
+
+    def test_stale_second_label_is_reported(self):
+        # Removal failed silently before; a PR carrying two verdict labels must warn.
+        proc, _ = self.run_comment_step(
+            {}, labels_after=['agent-jury-approved', 'agent-jury-needs-changes'],
+            verdict='approved', parsed={'verdict': 'approved', 'findings': [], 'summary': 's'})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("found 'agent-jury-approved,agent-jury-needs-changes'", proc.stdout)
+
+    def test_clean_stamp_is_quiet_and_404_removals_are_normal(self):
+        proc, root = self.run_comment_step(
+            {}, labels_after=['agent-jury-approved'], verdict='approved',
+            parsed={'verdict': 'approved', 'findings': [], 'summary': 's'})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn('::warning::', proc.stdout)
+        self.assertIn('on PR: agent-jury-approved', proc.stdout)
+        calls = (root / 'calls').read_text().splitlines()
+        self.assertEqual(sum(c.startswith('DELETE ') for c in calls), 4)
 
     def test_invalid_completion_reports_failure(self):
         proc, outputs, _, _ = self.run_review(response={'choices': [{'message': {'content': 'not JSON'}}]})
