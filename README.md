@@ -21,7 +21,7 @@ an estate-wide rollout.
 
 ## Pinning and releases
 
-The current release is **v1.1.1** (`a868a09b27976af8239cd295a6937c966f6b1f91`, tag `v1.1.1`). It writes the PR title, body and file list to `GITHUB_OUTPUT` under a random per-run delimiter, so a PR body line `EOF` can no longer inject step outputs (#13). Pin callers by full commit SHA. The previous release, **v1.1.0** (`c6567996e98d6c2228262646749821ce4f6522cd`), added the error tier for request-build and parse failures (CER-2146) and was canaried on cerebral-work/vilicus#36. Pin callers to the release commit by SHA, with the tag in a trailing comment. The moving `v1` tag still points at the older `701db71` and will be retired or moved only by an explicit operator decision.
+The current release is **v1.1.2** (`df7fe2a8efe50421e1e8dfb4bcc203c4b585d386`, tag `v1.1.2`). It keeps the gateway key off curl argv, and its caller example passes `AGENT_JURY_API_KEY` by name instead of `secrets: inherit` and forwards `api_url` / `model` from repo variables (#16). **v1.1.1** (`a868a09b27976af8239cd295a6937c966f6b1f91`) writes the PR title, body and file list to `GITHUB_OUTPUT` under a random per-run delimiter, so a PR body line `EOF` can no longer inject step outputs (#13). Pin callers by full commit SHA. The previous release, **v1.1.0** (`c6567996e98d6c2228262646749821ce4f6522cd`), added the error tier for request-build and parse failures (CER-2146) and was canaried on cerebral-work/vilicus#36. Pin callers to the release commit by SHA, with the tag in a trailing comment. The moving `v1` tag still points at the older `701db71` and will be retired or moved only by an explicit operator decision.
 
 ## Dependabot runs need their own key
 
