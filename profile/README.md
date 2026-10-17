@@ -31,6 +31,11 @@ A memory daemon modeled on human consolidation. Observation-layer writes, typed-
 
 Multi-agent orchestration with file-level locking and coord-protocol messaging. Runs many Claude Code / Cursor / Windsurf sessions in parallel without races. Replaces ad-hoc tmux hacks with a distributed-systems substrate.
 
+### architecture
+
+The estate separates conscious orchestration (`cerebral`) from execution substrates (`unsigned`).
+Read the [Architecture Overview](https://github.com/cerebral-work/.github/blob/main/docs/architecture/README.md), [Substrate Boundary](https://github.com/cerebral-work/.github/blob/main/docs/architecture/substrate-conscious-boundary.md), and [Kubernetes Rust Type System](https://github.com/cerebral-work/.github/blob/main/docs/architecture/kubernetes-rust-type-system.md).
+
 ---
 
 <div align="center">

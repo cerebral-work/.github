@@ -1,6 +1,24 @@
 # .github
 Org profile
 
+## Architecture Documentation
+
+The `docs/architecture` directory contains documentation for Kubernetes architecture across Cerebral and Unsigned:
+- [Architecture Overview](docs/architecture/README.md)
+- [Substrate and Conscious Boundary](docs/architecture/substrate-conscious-boundary.md)
+- [Kubernetes Rust Type System](docs/architecture/kubernetes-rust-type-system.md)
+- [CRD Catalog](docs/architecture/crd-catalog.md)
+
+Generate or update these documents with:
+```bash
+python3 scripts/generate_k8s_docs.py
+```
+
+Verify documentation parity with:
+```bash
+python3 scripts/generate_k8s_docs.py --check
+```
+
 ## Jury workflow tests
 
 Run `python3 -m pip install PyYAML==6.0.2`, then
