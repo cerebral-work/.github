@@ -14,3 +14,5 @@ jobs:
         run: python3 -m pip install PyYAML==6.0.2
       - name: Exercise actual review shell without network or credentials
         run: python3 -m unittest discover -s tests -v
+      - name: Verify documentation parity
+        run: python3 scripts/generate_k8s_docs.py --check
