@@ -48,6 +48,10 @@ HUNK = re.compile(r'^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@')
 # (`<!--`, `//`, `#`, `{/*`). So `noclaims: proven x` is not a marker.
 MARKER = re.compile(r'(?:^|(?<=\s)|(?<=<!--)|(?<=//)|(?<=#)|(?<=\{/\*))'
                     r'claims:\s*proven\b[ \t]*(\S*)', re.IGNORECASE)
+# A marker cites the next line only when its own line holds nothing else,
+# optionally wrapped in a comment: `<!-- -->`, `{/* */}`, `//` or `#`.
+STANDALONE = re.compile(r'^\s*(?:<!--|\{/\*|//|#)?\s*claims:\s*proven\b[ \t]*\S*'
+                        r'(?:\s*(?:-->|\*/\}|\*/))?\s*$', re.IGNORECASE)
 URL = re.compile(r'^https?://[^\s<>"\']+$', re.IGNORECASE)
 SHA = re.compile(r'^[0-9a-f]{7,40}$', re.IGNORECASE)
 PATH = re.compile(r'^(?:\.{0,2}/)?[\w.@+-]+(?:/[\w.@+-]+)+/?$|^[\w@+-]+\.[A-Za-z0-9]{1,8}$')
@@ -388,17 +392,17 @@ def check(diff, lexicon, globs, dirs, evidence):
             else:
                 clusters.append(([h], a))
                 end = b
-        lines[(path, line_no)] = (clusters, spans)
+        lines[(path, line_no)] = (clusters, spans, bool(STANDALONE.match(norm)))
         hits.extend(h for _, _, h in found)
     # A marker cites exactly one claim: one cluster of overlapping hits (for
-    # example `99.99%` and `99.99% uptime` are the same words). With no hit on
-    # its own line it cites the first claim on the next added line; otherwise
-    # the nearest claim before it on its own line.
-    for (path, line_no), (clusters, spans) in lines.items():
+    # example `99.99%` and `99.99% uptime` are the same words). A marker alone
+    # on its line cites the first claim on the next added line; any other
+    # marker cites only the nearest claim before it on its own line.
+    for (path, line_no), (clusters, spans, standalone) in lines.items():
         for start, _, ok in spans:
             if not ok:
                 continue
-            if clusters:
+            if not standalone:
                 before = [c for c, pos in clusters if pos < start]
                 if before:
                     for h in before[-1]:
