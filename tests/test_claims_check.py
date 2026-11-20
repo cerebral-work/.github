@@ -807,5 +807,10 @@ class Round4(unittest.TestCase):
         self.passes('<img alt="A cat on a mat">')
 
 
+    def test_nb_a_failed_marker_does_not_hide_its_own_text(self):
+        self.fails('We offer claims: proven bulletproof')
+        self.passes('We offer bulletproof copy. claims: proven docs/x.md')
+
+
 if __name__ == '__main__':
     unittest.main()
