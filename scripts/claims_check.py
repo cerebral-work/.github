@@ -18,9 +18,10 @@ import re
 import sys
 from pathlib import Path
 
-DEFAULT_GLOBS = ['*.md', '*.mdx', '*.html', '*.astro', '*.svelte', '*.vue',
-                 '*.tsx', '*.jsx']
-DEFAULT_DIRS = ['site', 'web', 'docs', 'public', 'legal', 'privacy', 'terms']
+DEFAULT_GLOBS = ['*.md', '*.mdx', '*.markdown', '*.rst', '*.html', '*.htm',
+                 '*.astro', '*.svelte', '*.vue', '*.tsx', '*.jsx', 'README*']
+DEFAULT_DIRS = ['site', 'web', 'docs', 'public', 'legal', 'privacy', 'terms',
+                'pricing', 'landing']
 MAX_INPUT_BYTES = 32 * 1024 * 1024
 MAX_LINE_CHARS = 2000
 
@@ -70,11 +71,15 @@ def load_lexicon(path):
 
 
 def in_scope(path, globs, dirs):
+    """Case-insensitive match of the file name or path against globs, or of a
+    parent directory name against dirs."""
+    path = path.lower()
     parts = path.split('/')
     name = parts[-1]
-    if any(fnmatch.fnmatch(name, g) or fnmatch.fnmatch(path, g) for g in globs):
+    if any(fnmatch.fnmatchcase(name, g.lower()) or fnmatch.fnmatchcase(path, g.lower())
+           for g in globs):
         return True
-    return any(d in parts[:-1] for d in dirs)
+    return any(d.lower() in parts[:-1] for d in dirs)
 
 
 def header_path(raw):
