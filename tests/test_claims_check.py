@@ -72,7 +72,7 @@ EVIDENCE = {'docs/x.md': 'evidence\n'}
 def run_repo(files, *extra, base='base\n', evidence=None):
     """Run the script with --repo on a repo that holds the evidence files."""
     diff, root = make_diff(files, base=base, extra=evidence or EVIDENCE, keep=True)
-    proc = run(diff, '--repo', str(root), *extra)
+    proc = run(diff, '--repo', str(root), '--base', 'HEAD~1', *extra)
     proc.root = root
     return proc
 
@@ -158,7 +158,7 @@ class ClaimsCheck(unittest.TestCase):
     def test_marker_with_commit_sha_passes(self):
         diff, root = make_diff({'docs/a.md': '<!-- claims: proven %s -->\nWe guarantee it.\n'}, keep=True)
         sha = git(root, 'rev-parse', '--short=7', 'HEAD~1').strip()
-        proc = run(diff.replace('%s', sha), '--repo', str(root))
+        proc = run(diff.replace('%s', sha), '--repo', str(root), '--base', 'HEAD~1')
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
 
     def test_marker_without_evidence_fails(self):
@@ -402,7 +402,7 @@ class Markers(unittest.TestCase):
         for sha in (git(root, 'rev-parse', 'HEAD~1').strip(),
                     git(root, 'rev-parse', '--short=7', 'HEAD~1').strip()):
             with self.subTest(sha=sha):
-                proc = run(diff.replace('SHA', sha), '--repo', str(root))
+                proc = run(diff.replace('SHA', sha), '--repo', str(root), '--base', 'HEAD~1')
                 self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
 
     def test_without_repo_nothing_resolves(self):
