@@ -19,9 +19,11 @@
 # job, so the reviewer approves the job that holds the credentials, after this
 # gate has run in the same workflow run, and a workflow edit cannot remove it.
 #
-# The range starts at the newest successful deployment of that environment,
-# which GitHub records for every job that uses it. A first deploy has none:
-# pass base_sha. The claims check always enforces here; there is no report mode.
+# The range starts at the newest successful deployment of that environment
+# whose commit is an ancestor of, or equal to, the commit being deployed. GitHub
+# records a deployment for every job that uses an environment. base_sha is used
+# only when no such deployment exists (a first deploy). The claims check always
+# enforces here; there is no report mode.
 name: deploy gate
 
 on:
@@ -35,9 +37,10 @@ on:
         required: true
       base_sha:
         description: >-
-          Full 40-character SHA to check from. Leave empty to use the newest
-          successful deployment of the environment. Set it only for a first
-          deploy, when no deployment exists.
+          Full 40-character SHA to check from, for a first deploy only. It is
+          used only when no successful deployment of the environment is an
+          ancestor of the commit being deployed, and it must be a strict
+          ancestor of that commit. Otherwise it is ignored with a warning.
         type: string
         default: ''
       runner:
@@ -141,42 +144,61 @@ jobs:
           esac
           HEAD_SHA=$(git rev-parse --verify -q 'HEAD^{commit}') || fail "no checked-out commit"
 
-          BASE=""
+          # base_sha is a fallback for a first deploy, never an override.
           if [ -n "${BASE_INPUT:-}" ]; then
             [[ "$BASE_INPUT" =~ ^[0-9a-f]{40}$ ]] || fail "input base_sha must be a full 40-character lower-case commit SHA"
-            BASE="$BASE_INPUT"
-            SOURCE="input base_sha"
+          fi
+
+          WORK=$(mktemp -d "${RUNNER_TEMP:-/tmp}/gate.XXXXXX")
+          trap 'rm -rf -- "$WORK"' EXIT
+          api() {
+            curl -sS --max-time 20 -o "$WORK/body.json" -w '%{http_code}' \
+              -H "Authorization: Bearer ${GATE_TOKEN}" \
+              -H 'Accept: application/vnd.github+json' "${API_URL}$1" 2> /dev/null
+          }
+          # Deployments come newest first. The base is the first one whose latest
+          # status is success and whose commit is an ancestor of, or equal to, the
+          # commit being deployed. A newer deployment that is not an ancestor (the
+          # deploy is a rollback) is skipped, so a commit that was never deployed
+          # is checked from the deployed commit before it. Three pages of 30.
+          BASE=""
+          SOURCE=""
+          SKIPPED=0
+          for page in 1 2 3; do
+            code=$(api "/repos/${REPO}/deployments?environment=${ENVIRONMENT}&per_page=30&page=${page}") || code=000
+            [ "$code" = 200 ] || fail "could not list the deployments of ${ENVIRONMENT} (HTTP ${code}); the caller must grant permissions: deployments: read"
+            jq -r '.[] | "\(.id) \(.sha)"' "$WORK/body.json" > "$WORK/page.txt" 2> /dev/null \
+              || fail "unreadable deployments list"
+            [ -s "$WORK/page.txt" ] || break
+            while read -r id sha; do
+              [[ "$id" =~ ^[0-9]+$ ]] || fail "malformed deployment id"
+              [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || fail "malformed SHA in deployment ${id}"
+              code=$(api "/repos/${REPO}/deployments/${id}/statuses?per_page=1") || code=000
+              [ "$code" = 200 ] || fail "could not read the statuses of deployment ${id} (HTTP ${code})"
+              state=$(jq -r '.[0].state // ""' "$WORK/body.json" 2> /dev/null) || fail "unreadable statuses of deployment ${id}"
+              [ "$state" = success ] || continue
+              if git merge-base --is-ancestor "$sha" "$HEAD_SHA" 2> /dev/null; then
+                BASE="$sha"
+                SOURCE="deployment ${id}"
+                break
+              fi
+              SKIPPED=$((SKIPPED + 1))
+            done < "$WORK/page.txt"
+            if [ -n "$BASE" ]; then break; fi
+          done
+
+          if [ -n "$BASE" ]; then
+            if [ -n "${BASE_INPUT:-}" ]; then
+              echo "::warning::deploy gate: input base_sha ignored; ${SOURCE} at ${BASE} is the base"
+              SOURCE="${SOURCE}; input base_sha ignored"
+            fi
           else
-            WORK=$(mktemp -d "${RUNNER_TEMP:-/tmp}/gate.XXXXXX")
-            trap 'rm -rf -- "$WORK"' EXIT
-            api() {
-              curl -sS --max-time 20 -o "$WORK/body.json" -w '%{http_code}' \
-                -H "Authorization: Bearer ${GATE_TOKEN}" \
-                -H 'Accept: application/vnd.github+json' "${API_URL}$1" 2> /dev/null
-            }
-            # Deployments come newest first. The first one whose latest status
-            # is success is the last deploy. Three pages of 30 bound the walk.
-            for page in 1 2 3; do
-              code=$(api "/repos/${REPO}/deployments?environment=${ENVIRONMENT}&per_page=30&page=${page}") || code=000
-              [ "$code" = 200 ] || fail "could not list the deployments of ${ENVIRONMENT} (HTTP ${code}); the caller must grant permissions: deployments: read"
-              jq -r '.[] | "\(.id) \(.sha)"' "$WORK/body.json" > "$WORK/page.txt" 2> /dev/null \
-                || fail "unreadable deployments list"
-              [ -s "$WORK/page.txt" ] || break
-              while read -r id sha; do
-                [[ "$id" =~ ^[0-9]+$ ]] || fail "malformed deployment id"
-                code=$(api "/repos/${REPO}/deployments/${id}/statuses?per_page=1") || code=000
-                [ "$code" = 200 ] || fail "could not read the statuses of deployment ${id} (HTTP ${code})"
-                state=$(jq -r '.[0].state // ""' "$WORK/body.json" 2> /dev/null) || fail "unreadable statuses of deployment ${id}"
-                if [ "$state" = success ]; then
-                  BASE="$sha"
-                  SOURCE="deployment ${id}"
-                  break
-                fi
-              done < "$WORK/page.txt"
-              if [ -n "$BASE" ]; then break; fi
-            done
-            [ -n "$BASE" ] || fail "no successful deployment of ${ENVIRONMENT} in the newest 90; for a first deploy set input base_sha"
-            [[ "$BASE" =~ ^[0-9a-f]{40}$ ]] || fail "the deployment SHA is malformed"
+            [ -n "${BASE_INPUT:-}" ] || fail "no successful deployment of ${ENVIRONMENT} at an ancestor of ${HEAD_SHA} in the newest 90; for a first deploy set input base_sha"
+            [ "$BASE_INPUT" != "$HEAD_SHA" ] || fail "input base_sha is the commit being deployed; it must be an earlier commit"
+            git merge-base --is-ancestor "$BASE_INPUT" "$HEAD_SHA" 2> /dev/null \
+              || fail "input base_sha ${BASE_INPUT} is not an ancestor of ${HEAD_SHA}"
+            BASE="$BASE_INPUT"
+            SOURCE="input base_sha, no deployed ancestor"
           fi
           git cat-file -e "${BASE}^{commit}" 2> /dev/null || fail "base ${BASE} is not in this repository's history"
 
@@ -188,12 +210,14 @@ jobs:
             echo "| Last deployed | \`${BASE}\` ($(cell "$SOURCE")) |"
             echo "| Deploying | \`${HEAD_SHA}\` |"
             echo "| Commits in range | ${COMMITS} |"
+            echo "| Deployed non-ancestors skipped | ${SKIPPED} |"
             echo "| Claims mode | \`enforce\` |"
             echo "| Claims paths | $( [ -n "${CLAIMS_PATHS:-}" ] && echo "\`$(cell "$CLAIMS_PATHS")\`" || echo "default scope" ) |"
             echo "| Evidence paths | \`$(cell "${CLAIMS_EVIDENCE_PATHS:-}")\` |"
             echo "| URL prefixes | $( [ -n "${CLAIMS_URL_PREFIXES:-}" ] && echo "\`$(cell "$CLAIMS_URL_PREFIXES")\`" || echo "none" ) |"
             echo ""
           } >> "$SUMMARY"
+          echo "deploy gate: range ${BASE}..${HEAD_SHA}, ${COMMITS} commit(s), base from ${SOURCE}"
           { echo "base=${BASE}"; echo "sha=${HEAD_SHA}"; } >> "$OUT"
 
       - name: Check claims in the deploy range
