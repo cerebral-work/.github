@@ -81,6 +81,16 @@
     {"term": "HITRUST", "category": "certification"},
     {"term": "five nines", "category": "metric"},
     {"term": "\\d+\\s+nines", "category": "metric", "regex": true},
-    {"term": "\\d+\\.\\d+\\s*%", "category": "metric", "regex": true}
+    {"term": "\\d+\\.\\d+\\s*%", "category": "metric", "regex": true},
+    {"term": "the\\s+(?:best|worst|most\\s+\\w+|\\w{3,}est)\\s+ever", "category": "absolute", "regex": true},
+    {"term": "uncrackable", "category": "absolute"},
+    {"term": "never\\s+(?:lose|loses|lost)\\s+(?:any\\s+|your\\s+)?data", "category": "absolute", "regex": true},
+    {"term": "lossless", "category": "absolute"},
+    {"term": "provably secure", "category": "absolute"},
+    {"term": "end-to-end encrypted", "category": "certification"},
+    {"term": "safe and secure", "category": "absolute"},
+    {"term": "best-in-class", "category": "absolute"},
+    {"term": "industry-leading", "category": "absolute"},
+    {"term": "trusted\\s+by\\s+(?:\\d[\\d,.]*|(?-i:[A-Z])\\w*)", "category": "certification", "regex": true}
   ]
 }
