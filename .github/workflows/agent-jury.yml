@@ -832,9 +832,12 @@ jobs:
             exit 0
           fi
 
+          # The runner starts this step as `bash -e {0}`: capture the exit code
+          # without letting errexit end the step before the mode logic runs.
+          CHECK_EXIT=0
           python3 .jury-tools/scripts/claims_check.py "$WORK/pr.diff" \
-            --lexicon .jury-tools/scripts/claims_lexicon.json > "$WORK/hits.json" 2> "$WORK/check.err"
-          CHECK_EXIT=$?
+            --lexicon .jury-tools/scripts/claims_lexicon.json > "$WORK/hits.json" 2> "$WORK/check.err" \
+            || CHECK_EXIT=$?
           if [ "$CHECK_EXIT" -eq 0 ]; then
             echo "Result: no uncited claims in added public text. Model not called." >> "$SUMMARY"
             exit 0
@@ -844,10 +847,13 @@ jobs:
             finish 1 "::error::claims check: script failed (exit ${CHECK_EXIT}), failing closed"
           fi
 
-          UNCITED=$(jq -r '.uncited' "$WORK/hits.json")
+          UNCITED=$(jq -r '.uncited' "$WORK/hits.json") || UNCITED="?"
           # Only uncited hits go to the model. Index them so answers map back.
-          jq -c '[.hits[] | select(.cited | not)] | to_entries | map({index: .key, file: .value.file, line: .value.line, term: .value.term, category: .value.category, text: .value.text})' \
-            "$WORK/hits.json" > "$WORK/uncited.json"
+          if ! jq -c '[.hits[] | select(.cited | not)] | to_entries | map({index: .key, file: .value.file, line: .value.line, term: .value.term, category: .value.category, text: .value.text})' \
+            "$WORK/hits.json" > "$WORK/uncited.json"; then
+            echo "Result: could not read the script output." >> "$SUMMARY"
+            finish 2 "::error::claims check: unreadable script output, failing closed"
+          fi
 
           # Diff context, bounded. Via files, never argv.
           head -c "$DIFF_BUDGET" "$WORK/pr.diff" > "$WORK/diff-trunc.txt"
@@ -910,7 +916,7 @@ jobs:
           fi
 
           jq -r '.choices[0].message.content // empty' "$WORK/response.json" 2>/dev/null \
-            | sed 's/^```json//; s/^```//; s/```$//' > "$WORK/content.txt"
+            | sed 's/^```json//; s/^```//; s/```$//' > "$WORK/content.txt" || true
           if ! jq -e '.classifications | type == "array"' "$WORK/content.txt" > /dev/null 2>&1; then
             echo "Result: ${UNCITED} uncited hit(s); the model answer was not usable. Failing closed." >> "$SUMMARY"
             finish 1 "::error::claims check: unusable model answer with ${UNCITED} uncited hit(s)"
@@ -918,14 +924,21 @@ jobs:
 
           # Per hit: the class is whitelisted; a missing or unknown class counts
           # as unverified. Only `proven` passes.
-          jq -c --slurpfile h "$WORK/uncited.json" '
+          if ! jq -c --slurpfile h "$WORK/uncited.json" '
             . as $r
             | $h[0] | map(. as $hit
               | ($r.classifications | map(select(.index == $hit.index)) | first // {}) as $c
               | $hit + {class: (if ($c.class | IN("proven","unverified","guarantee","liability")) then $c.class else "unverified" end),
                         reason: (($c.reason // "") | tostring | .[0:200])})' \
-            "$WORK/content.txt" > "$WORK/classified.json"
-          BAD=$(jq '[.[] | select(.class != "proven")] | length' "$WORK/classified.json")
+            "$WORK/content.txt" > "$WORK/classified.json" 2> /dev/null; then
+            echo "Result: ${UNCITED} uncited hit(s); the model answer had a malformed entry. Failing closed." >> "$SUMMARY"
+            finish 2 "::error::claims check: malformed classification entry with ${UNCITED} uncited hit(s), failing closed"
+          fi
+          BAD=$(jq '[.[] | select(.class != "proven")] | length' "$WORK/classified.json" 2> /dev/null) || BAD=""
+          if ! [[ "$BAD" =~ ^[0-9]+$ ]] || [ ! -s "$WORK/classified.json" ]; then
+            echo "Result: ${UNCITED} uncited hit(s); the classification could not be counted. Failing closed." >> "$SUMMARY"
+            finish 2 "::error::claims check: classification result unusable with ${UNCITED} uncited hit(s), failing closed"
+          fi
 
           {
             echo ""
