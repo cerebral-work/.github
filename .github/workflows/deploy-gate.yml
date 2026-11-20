@@ -1,0 +1,214 @@
+# Deploy gate: the claims check on everything a deploy ships.
+#
+# A caller's deploy job `needs:` this workflow and holds the approval itself:
+#
+#   jobs:
+#     gate:
+#       uses: cerebral-work/.github/.github/workflows/deploy-gate.yml@<sha> # <tag>
+#       permissions: { contents: read, deployments: read }
+#       with: { environment: web-prod }
+#       secrets: { AGENT_JURY_API_KEY: "${{ secrets.AGENT_JURY_API_KEY }}" }
+#     deploy:
+#       needs: gate
+#       environment: web-prod   # required reviewer, main only, deploy secrets
+#       steps:
+#         - uses: actions/checkout@<sha>
+#           with: { ref: "${{ needs.gate.outputs.sha }}" }
+#
+# The environment is the approval (TASK-0823, option A). It sits on the deploy
+# job, so the reviewer approves the job that holds the credentials, after this
+# gate has run in the same workflow run, and a workflow edit cannot remove it.
+#
+# The range starts at the newest successful deployment of that environment,
+# which GitHub records for every job that uses it. A first deploy has none:
+# pass base_sha. The claims check always enforces here; there is no report mode.
+name: deploy gate
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: >-
+          The GitHub environment the caller's deploy job uses, for example
+          reverie-docs-prod. Letters, digits, '.', '_' and '-' only.
+        type: string
+        required: true
+      base_sha:
+        description: >-
+          Full 40-character SHA to check from. Leave empty to use the newest
+          successful deployment of the environment. Set it only for a first
+          deploy, when no deployment exists.
+        type: string
+        default: ''
+      runner:
+        description: Runner label for the gate job. It must reach api_url.
+        type: string
+        default: self-hosted
+      model:
+        type: string
+        default: glm-5.2-fast
+      api_url:
+        description: LiteLLM gateway base URL.
+        type: string
+        default: http://llm.llm.svc.cluster.local:4000
+      diff_budget:
+        type: number
+        default: 60000
+      timeout_minutes:
+        type: number
+        default: 10
+      curl_timeout_secs:
+        type: number
+        default: 0
+      claims_paths:
+        description: Replaces the default public-text scope. See README, Claims check.
+        type: string
+        default: ''
+      claims_evidence_paths:
+        description: Paths that may hold evidence. See README, Claims check.
+        type: string
+        default: 'evidence/**,docs/evidence/**'
+      claims_url_prefixes:
+        description: URL prefixes that count as evidence. Empty means none.
+        type: string
+        default: ''
+    secrets:
+      AGENT_JURY_API_KEY:
+        description: LiteLLM gateway key, the org secret, passed by name.
+        required: true
+    outputs:
+      sha:
+        description: The commit the gate checked. Deploy exactly this commit.
+        value: ${{ jobs.claims.outputs.sha }}
+      base:
+        description: The commit the range starts at.
+        value: ${{ jobs.claims.outputs.base }}
+
+jobs:
+  claims:
+    name: claims check
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    permissions:
+      contents: read
+      deployments: read
+    outputs:
+      sha: ${{ steps.range.outputs.sha }}
+      base: ${{ steps.range.outputs.base }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The scripts come from this repo at the commit the caller pinned.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .jury-tools
+          persist-credentials: false
+
+      - name: Resolve the deploy range
+        id: range
+        env:
+          API_URL: ${{ github.api_url }}
+          REPO: ${{ github.repository }}
+          GATE_TOKEN: ${{ github.token }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          BASE_INPUT: ${{ inputs.base_sha }}
+          CLAIMS_PATHS: ${{ inputs.claims_paths }}
+          CLAIMS_EVIDENCE_PATHS: ${{ inputs.claims_evidence_paths }}
+          CLAIMS_URL_PREFIXES: ${{ inputs.claims_url_prefixes }}
+        run: |
+          set -uo pipefail
+          SUMMARY="${GITHUB_STEP_SUMMARY:-/dev/null}"
+          OUT="${GITHUB_OUTPUT:-/dev/null}"
+          fail() {
+            echo "::error::deploy gate: $1"
+            echo "Result: $1" >> "$SUMMARY"
+            exit 1
+          }
+          # One cell of the summary table: no backticks, pipes or line breaks.
+          cell() { printf '%s' "$1" | tr -d '`|\r\n'; }
+
+          echo "## Deploy gate" >> "$SUMMARY"
+          echo "" >> "$SUMMARY"
+
+          # The name goes into an API query string: allow only safe characters.
+          case "$ENVIRONMENT" in
+            '' | *[!A-Za-z0-9._-]*) fail "input environment must use only letters, digits, '.', '_' and '-'" ;;
+          esac
+          HEAD_SHA=$(git rev-parse --verify -q 'HEAD^{commit}') || fail "no checked-out commit"
+
+          BASE=""
+          if [ -n "${BASE_INPUT:-}" ]; then
+            [[ "$BASE_INPUT" =~ ^[0-9a-f]{40}$ ]] || fail "input base_sha must be a full 40-character lower-case commit SHA"
+            BASE="$BASE_INPUT"
+            SOURCE="input base_sha"
+          else
+            WORK=$(mktemp -d "${RUNNER_TEMP:-/tmp}/gate.XXXXXX")
+            trap 'rm -rf -- "$WORK"' EXIT
+            api() {
+              curl -sS --max-time 20 -o "$WORK/body.json" -w '%{http_code}' \
+                -H "Authorization: Bearer ${GATE_TOKEN}" \
+                -H 'Accept: application/vnd.github+json' "${API_URL}$1" 2> /dev/null
+            }
+            # Deployments come newest first. The first one whose latest status
+            # is success is the last deploy. Three pages of 30 bound the walk.
+            for page in 1 2 3; do
+              code=$(api "/repos/${REPO}/deployments?environment=${ENVIRONMENT}&per_page=30&page=${page}") || code=000
+              [ "$code" = 200 ] || fail "could not list the deployments of ${ENVIRONMENT} (HTTP ${code}); the caller must grant permissions: deployments: read"
+              jq -r '.[] | "\(.id) \(.sha)"' "$WORK/body.json" > "$WORK/page.txt" 2> /dev/null \
+                || fail "unreadable deployments list"
+              [ -s "$WORK/page.txt" ] || break
+              while read -r id sha; do
+                [[ "$id" =~ ^[0-9]+$ ]] || fail "malformed deployment id"
+                code=$(api "/repos/${REPO}/deployments/${id}/statuses?per_page=1") || code=000
+                [ "$code" = 200 ] || fail "could not read the statuses of deployment ${id} (HTTP ${code})"
+                state=$(jq -r '.[0].state // ""' "$WORK/body.json" 2> /dev/null) || fail "unreadable statuses of deployment ${id}"
+                if [ "$state" = success ]; then
+                  BASE="$sha"
+                  SOURCE="deployment ${id}"
+                  break
+                fi
+              done < "$WORK/page.txt"
+              if [ -n "$BASE" ]; then break; fi
+            done
+            [ -n "$BASE" ] || fail "no successful deployment of ${ENVIRONMENT} in the newest 90; for a first deploy set input base_sha"
+            [[ "$BASE" =~ ^[0-9a-f]{40}$ ]] || fail "the deployment SHA is malformed"
+          fi
+          git cat-file -e "${BASE}^{commit}" 2> /dev/null || fail "base ${BASE} is not in this repository's history"
+
+          COMMITS=$(git rev-list --count "${BASE}..${HEAD_SHA}" 2> /dev/null) || COMMITS="?"
+          {
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Environment | \`$(cell "$ENVIRONMENT")\` |"
+            echo "| Last deployed | \`${BASE}\` ($(cell "$SOURCE")) |"
+            echo "| Deploying | \`${HEAD_SHA}\` |"
+            echo "| Commits in range | ${COMMITS} |"
+            echo "| Claims mode | \`enforce\` |"
+            echo "| Claims paths | $( [ -n "${CLAIMS_PATHS:-}" ] && echo "\`$(cell "$CLAIMS_PATHS")\`" || echo "default scope" ) |"
+            echo "| Evidence paths | \`$(cell "${CLAIMS_EVIDENCE_PATHS:-}")\` |"
+            echo "| URL prefixes | $( [ -n "${CLAIMS_URL_PREFIXES:-}" ] && echo "\`$(cell "$CLAIMS_URL_PREFIXES")\`" || echo "none" ) |"
+            echo ""
+          } >> "$SUMMARY"
+          { echo "base=${BASE}"; echo "sha=${HEAD_SHA}"; } >> "$OUT"
+
+      - name: Check claims in the deploy range
+        env:
+          LITELLM_URL: ${{ inputs.api_url }}
+          LITELLM_KEY: ${{ secrets.AGENT_JURY_API_KEY }}
+          JURY_MODEL: ${{ inputs.model }}
+          CURL_TIMEOUT_INPUT: ${{ inputs.curl_timeout_secs }}
+          JOB_TIMEOUT_MINUTES: ${{ inputs.timeout_minutes }}
+          DIFF_BUDGET: ${{ inputs.diff_budget }}
+          CLAIMS_MODE: enforce
+          CLAIMS_URL_PREFIXES: ${{ inputs.claims_url_prefixes }}
+          CLAIMS_EVIDENCE_PATHS: ${{ inputs.claims_evidence_paths }}
+          CLAIMS_PATHS: ${{ inputs.claims_paths }}
+          BASE_REF: ''
+          BASE_SHA: ${{ steps.range.outputs.base }}
+          CLAIMS_SUBJECT: Deploy to ${{ inputs.environment }}, ${{ steps.range.outputs.base }}..${{ steps.range.outputs.sha }}
+        run: bash -e .jury-tools/scripts/claims_job.sh
