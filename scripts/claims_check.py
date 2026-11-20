@@ -416,7 +416,7 @@ def blank_scan(scan, idx, spans):
     """Blank the scan characters that came from a marker."""
     out = list(scan)
     for k, pos in enumerate(idx):
-        if any(a <= pos < b for a, b, _ in spans):
+        if any(a <= pos < b for a, b, ok in spans if ok):
             out[k] = ' '
     return ''.join(out)
 
