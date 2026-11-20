@@ -73,15 +73,22 @@ def clean_token(token):
 class Evidence:
     """Decides whether a marker's evidence resolves. Never fetches a URL.
 
-    - path: exists at HEAD of `repo` (git cat-file -e HEAD:<path>);
-    - sha: names a commit in `repo`;
+    - path: a regular, non-empty file (not a symlink, not a directory) at the
+      base ref of `repo`, not a file the PR adds, changes or deletes, and, when
+      `evidence_globs` is set, matching one of them;
+    - sha: a commit that is an ancestor of the base ref
+      (git merge-base --is-ancestor <sha> <base>);
     - url: https, no userinfo, no port, host exactly in the allowlist.
-    Anything else does not cite, so the check fails closed.
+    Anything else does not cite, so the check fails closed. Without `base`
+    no path or SHA resolves.
     """
 
-    def __init__(self, repo=None, url_hosts=()):
+    def __init__(self, repo=None, url_hosts=(), base=None, evidence_globs=(), changed=()):
         self.repo = repo
+        self.base = base
         self.url_hosts = {h.strip().lower() for h in url_hosts if h.strip()}
+        self.evidence_globs = [g.strip() for g in evidence_globs if g.strip()]
+        self.changed = set(changed)
         self.cache = {}
 
     def resolves(self, token):
@@ -92,30 +99,64 @@ class Evidence:
             self.cache[token] = self._resolve(token)
         return self.cache[token]
 
-    def _git_ok(self, *args):
-        if not self.repo:
-            return False
+    def _git(self, *args):
+        if not self.repo or not self.base:
+            return None
         try:
-            r = subprocess.run(['git', '-C', self.repo, 'cat-file', '-e', *args],
+            r = subprocess.run(['git', '--literal-pathspecs', '-C', self.repo, *args],
                                capture_output=True, timeout=GIT_TIMEOUT_SECS)
         except (OSError, subprocess.SubprocessError):
-            return False
-        return r.returncode == 0
+            return None
+        return r if r.returncode == 0 else None
 
     def _resolve(self, token):
         if URL.match(token):
             return self._url_ok(token)
         if SHA.match(token):
-            return self._git_ok(token + '^{commit}')
+            return self._sha_ok(token)
         if PATH.match(token):
             path = token
             while path.startswith('./'):
                 path = path[2:]
             path = path.rstrip('/')
-            if not path or path.startswith('/') or '..' in path.split('/'):
+            if not path or path.startswith('/') or path.startswith('-') \
+                    or '..' in path.split('/'):
                 return False
-            return self._git_ok('HEAD:' + path)
+            return self._path_ok(path)
         return False
+
+    def _sha_ok(self, sha):
+        if self.base.startswith('-'):
+            return False
+        if not self._git('cat-file', '-e', sha + '^{commit}'):
+            return False
+        full = self._git('rev-parse', '--verify', '-q', sha + '^{commit}')
+        if not full:
+            return False
+        return self._git('merge-base', '--is-ancestor', full.stdout.decode().strip(),
+                         self.base) is not None
+
+    def _path_ok(self, path):
+        if path in self.changed:
+            return False
+        if self.evidence_globs and not any(fnmatch.fnmatchcase(path, g)
+                                           for g in self.evidence_globs):
+            return False
+        if self.base.startswith('-'):
+            return False
+        r = self._git('ls-tree', '-l', self.base, '--', path)
+        if not r:
+            return False
+        rows = r.stdout.decode('utf-8', 'replace').splitlines()
+        if len(rows) != 1:
+            return False
+        meta, _, name = rows[0].partition('\t')
+        fields = meta.split()
+        if name != path or len(fields) != 4:
+            return False
+        mode, kind, _, size = fields
+        return mode in ('100644', '100755') and kind == 'blob' and size.isdigit() \
+            and int(size) > 0
 
     def _url_ok(self, url):
         try:
@@ -215,9 +256,22 @@ def header_path(raw):
     return path
 
 
+def header_a_path(raw):
+    """Best-effort a-side path of a `diff --git a/X b/Y` line."""
+    rest = raw[len('diff --git '):]
+    k = rest.rfind(' b/')
+    if k < 0 or not rest.startswith('a/'):
+        return None
+    path = rest[2:k]
+    if path.startswith('"') and path.endswith('"'):
+        path = path[1:-1]
+    return path
+
+
 def parse_added(diff):
-    """Yield ('line', file, line_no, text) per added line and
-    ('unreadable', file, reason) per binary change.
+    """Yield ('line', file, line_no, text) per added line,
+    ('unreadable', file, reason) per binary change and ('changed', file) per
+    path the diff touches (either side).
 
     Pure renames, mode changes and deletions have no hunks and are valid.
     """
@@ -236,6 +290,9 @@ def parse_added(diff):
             in_hunk = False
             cur = None
             git_path = header_path(raw)
+            for side in (git_path, header_a_path(raw)):
+                if side:
+                    yield 'changed', side
             deleted = False
             reported = False
             continue
@@ -244,6 +301,10 @@ def parse_added(diff):
             continue
         if not in_hunk and raw.startswith('rename to '):
             git_path = raw[len('rename to '):]
+            yield 'changed', git_path
+            continue
+        if not in_hunk and raw.startswith('rename from '):
+            yield 'changed', raw[len('rename from '):]
             continue
         if not in_hunk and (raw.startswith('Binary files ') or raw == 'GIT binary patch'):
             if git_path and not deleted and not reported:
@@ -286,7 +347,11 @@ def blank_spans(text, spans):
 def check(diff, lexicon, globs, dirs, evidence):
     hits = []
     lines = {}
-    for ev in parse_added(diff):
+    events = list(parse_added(diff))
+    evidence.changed |= {ev[1] for ev in events if ev[0] == 'changed'}
+    for ev in events:
+        if ev[0] == 'changed':
+            continue
         if ev[0] == 'unreadable':
             _, path, reason = ev
             if in_scope(path, globs, dirs):
@@ -351,11 +416,14 @@ def parse_args(argv):
     scopes = []
     repo = None
     url_hosts = []
+    base = None
+    evidence_globs = []
     lexicon = Path(__file__).resolve().with_name('claims_lexicon.json')
     i = 0
     while i < len(argv):
         a = argv[i]
-        if a in ('--scope', '--lexicon', '--repo', '--url-hosts'):
+        if a in ('--scope', '--lexicon', '--repo', '--url-hosts', '--base',
+                 '--evidence-paths'):
             if i + 1 >= len(argv):
                 raise BadInput('%s needs a value' % a)
             v = argv[i + 1]
@@ -365,6 +433,10 @@ def parse_args(argv):
                 lexicon = v
             elif a == '--repo':
                 repo = v
+            elif a == '--base':
+                base = v
+            elif a == '--evidence-paths':
+                evidence_globs = v.split(',')
             else:
                 url_hosts = v.split(',')
             i += 2
@@ -375,12 +447,12 @@ def parse_args(argv):
             i += 1
         else:
             raise BadInput('only one diff input allowed')
-    return src, scopes, lexicon, repo, url_hosts
+    return src, scopes, lexicon, repo, url_hosts, base, evidence_globs
 
 
 def main(argv):
     try:
-        src, scopes, lexicon_path, repo, url_hosts = parse_args(argv)
+        src, scopes, lexicon_path, repo, url_hosts, base, evidence_globs = parse_args(argv)
         try:
             if src in (None, '-'):
                 data = sys.stdin.buffer.read(MAX_INPUT_BYTES + 1)
@@ -397,7 +469,7 @@ def main(argv):
         lexicon = load_lexicon(lexicon_path)
         globs = scopes if scopes else DEFAULT_GLOBS
         dirs = [] if scopes else DEFAULT_DIRS
-        result = check(diff, lexicon, globs, dirs, Evidence(repo, url_hosts))
+        result = check(diff, lexicon, globs, dirs, Evidence(repo, url_hosts, base, evidence_globs))
     except BadInput as exc:
         sys.stderr.write('claims_check: bad input: %s\n' % exc)
         return 2

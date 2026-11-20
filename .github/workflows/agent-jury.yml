@@ -191,6 +191,15 @@ on:
           job never fetches a URL. Any other URL does not cite.
         type: string
         default: github.com
+      claims_evidence_paths:
+        description: >-
+          Comma-separated globs. When set, a path cited as `claims: proven
+          <path>` evidence in the `claims check` job must match one of them.
+          Empty (the default) means any path. A cited path must also be a
+          regular, non-empty file at the base branch tip, and not a file the
+          PR changes.
+        type: string
+        default: ''
     secrets:
       AGENT_JURY_API_KEY:
         description: >-
@@ -801,6 +810,7 @@ jobs:
           DIFF_BUDGET: ${{ inputs.diff_budget }}
           CLAIMS_MODE: ${{ inputs.claims_mode }}
           CLAIMS_URL_HOSTS: ${{ inputs.claims_url_hosts }}
+          CLAIMS_EVIDENCE_PATHS: ${{ inputs.claims_evidence_paths }}
           BASE_REF: ${{ github.base_ref }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -842,12 +852,19 @@ jobs:
             exit 0
           fi
 
+          # Evidence resolves at the base branch tip, never at the PR head.
+          EVIDENCE_BASE="origin/${BASE_REF}"
+          if ! git rev-parse --verify -q "${EVIDENCE_BASE}^{commit}" > /dev/null; then
+            EVIDENCE_BASE="$BASE_SHA"
+          fi
+
           # The runner starts this step as `bash -e {0}`: capture the exit code
           # without letting errexit end the step before the mode logic runs.
           CHECK_EXIT=0
           python3 .jury-tools/scripts/claims_check.py "$WORK/pr.diff" \
             --lexicon .jury-tools/scripts/claims_lexicon.json \
-            --repo . --url-hosts "${CLAIMS_URL_HOSTS:-}" > "$WORK/hits.json" 2> "$WORK/check.err" \
+            --repo . --base "$EVIDENCE_BASE" --evidence-paths "${CLAIMS_EVIDENCE_PATHS:-}" \
+            --url-hosts "${CLAIMS_URL_HOSTS:-}" > "$WORK/hits.json" 2> "$WORK/check.err" \
             || CHECK_EXIT=$?
           if [ "$CHECK_EXIT" -eq 0 ]; then
             echo "Result: no uncited claims in added public text. Model not called." >> "$SUMMARY"
