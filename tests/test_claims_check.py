@@ -654,10 +654,8 @@ class ClaimsJobShell(unittest.TestCase):
     def setUpClass(cls):
         import http.server
         import threading
-        import yaml
-        wf = yaml.safe_load((SCRIPT.parent.parent / '.github/workflows/agent-jury.yml').read_text())
-        cls.script = next(s['run'] for s in wf['jobs']['claims']['steps']
-                          if s.get('name', '').startswith('Check claims'))
+        # The file both workflows run (tests/test_deploy_gate.py checks that).
+        cls.script = (SCRIPT.parent / 'claims_job.sh').read_text()
         cls.state = {'answer': None, 'calls': 0}
         state = cls.state
 
@@ -739,6 +737,13 @@ class ClaimsJobShell(unittest.TestCase):
     def test_model_guarantee_fails(self):
         ans = {'classifications': [{'index': 0, 'class': 'guarantee'}]}
         self.assertEqual(self.run_job('We guarantee it.\n', answer=ans), (1, 1))
+
+    def test_deploy_range_without_a_base_ref(self):
+        # The deploy gate passes only BASE_SHA (the last deployed commit).
+        ans = {'classifications': [{'index': 0, 'class': 'guarantee'}]}
+        self.assertEqual(self.run_job('We guarantee it.\n', answer=ans,
+                                      extra_env={'BASE_REF': '', 'PR_NUMBER': ''}), (1, 1))
+        self.assertEqual(self.run_job('Plain copy.\n', extra_env={'BASE_REF': ''}), (0, 0))
 
     def test_model_proven_passes(self):
         ans = {'classifications': [{'index': 0, 'class': 'proven'}]}
