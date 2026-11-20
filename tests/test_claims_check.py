@@ -140,5 +140,89 @@ class ClaimsCheck(unittest.TestCase):
         self.assertIn('bad input', proc.stderr)
 
 
+class ClaimsJobShell(unittest.TestCase):
+    """Run the real `claims` job shell against a local fake gateway."""
+
+    @classmethod
+    def setUpClass(cls):
+        import http.server
+        import threading
+        import yaml
+        wf = yaml.safe_load((SCRIPT.parent.parent / '.github/workflows/agent-jury.yml').read_text())
+        cls.script = next(s['run'] for s in wf['jobs']['claims']['steps']
+                          if s.get('name', '').startswith('Check claims'))
+        cls.state = {'answer': None, 'calls': 0}
+        state = cls.state
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers['Content-Length']))
+                state['calls'] += 1
+                if state['answer'] is None:
+                    self.send_response(500)
+                    self.end_headers()
+                    return
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(json.dumps({'choices': [{'message': {
+                    'content': json.dumps(state['answer'])}}]}).encode())
+
+            def log_message(self, *args):
+                pass
+
+        cls.server = http.server.HTTPServer(('127.0.0.1', 0), Handler)
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+
+    def run_job(self, text, mode='enforce', answer=None):
+        self.state.update(answer=answer, calls=0)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / 'site').mkdir()
+            git(root, 'init', '-q', '-b', 'main')
+            (root / 'site/a.md').write_text('x\n')
+            git(root, *IDENT, 'add', '-A')
+            git(root, *IDENT, 'commit', '-q', '-m', 'base')
+            base = git(root, 'rev-parse', 'HEAD').strip()
+            (root / 'site/a.md').write_text(text)
+            git(root, *IDENT, 'commit', '-qam', 'change')
+            os.symlink(SCRIPT.parent.parent, root / '.jury-tools')
+            env = {**GIT_ENV, 'LITELLM_URL': 'http://127.0.0.1:%d' % self.server.server_port,
+                   'LITELLM_KEY': 'fixture', 'JURY_MODEL': 'm', 'CURL_TIMEOUT_INPUT': '30',
+                   'JOB_TIMEOUT_MINUTES': '10', 'DIFF_BUDGET': '60000', 'CLAIMS_MODE': mode,
+                   'BASE_REF': 'absent', 'BASE_SHA': base, 'PR_NUMBER': '1',
+                   'GITHUB_STEP_SUMMARY': str(root / 'summary.md'), 'RUNNER_TEMP': temp}
+            proc = subprocess.run(['bash', '-c', self.script], cwd=root, env=env,
+                                  capture_output=True, text=True)
+        return proc.returncode, self.state['calls']
+
+    def test_clean_passes_without_model_call(self):
+        self.assertEqual(self.run_job('Plain copy.\n'), (0, 0))
+
+    def test_cited_passes_without_model_call(self):
+        text = '<!-- claims: proven docs/x.md -->\nWe guarantee it.\n'
+        self.assertEqual(self.run_job(text), (0, 0))
+
+    def test_model_guarantee_fails(self):
+        ans = {'classifications': [{'index': 0, 'class': 'guarantee'}]}
+        self.assertEqual(self.run_job('We guarantee it.\n', answer=ans), (1, 1))
+
+    def test_model_proven_passes(self):
+        ans = {'classifications': [{'index': 0, 'class': 'proven'}]}
+        self.assertEqual(self.run_job('We guarantee it.\n', answer=ans), (0, 1))
+
+    def test_model_failure_fails_closed(self):
+        self.assertEqual(self.run_job('We guarantee it.\n'), (1, 1))
+
+    def test_missing_classification_fails_closed(self):
+        self.assertEqual(self.run_job('We guarantee it.\n', answer={'classifications': []}), (1, 1))
+
+    def test_report_mode_never_fails(self):
+        self.assertEqual(self.run_job('We guarantee it.\n', mode='report'), (0, 1))
+
+
 if __name__ == '__main__':
     unittest.main()
