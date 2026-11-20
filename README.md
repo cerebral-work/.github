@@ -86,7 +86,7 @@ Residual risks:
 - N-E: with `on: pull_request`, a PR can edit its own caller workflow and loosen `claims_mode`, `claims_paths` or `claims_evidence_paths`. The PR-time check is a tripwire, not an enforcement point against a hostile author. The enforcement point is the deploy gate: it runs from main, cannot be put in report mode and is bound to an approval.
 - A marker glued to the text before it, with no space or comment opener between (`copy.claims: proven docs/evidence/a.md`), is not recognised and does not cite. This fails closed and is a minor case.
 - The lexicon is finite, so a claim phrased with other words passes. A test of any lexicon cannot prove completeness.
-- A word with a precomposed accent (`assur\u00e9`) does not match the English term it becomes once accents are stripped, so French copy is clean. An English claim spelled with a precomposed accent, such as `guarant\u00e9e`, passes for the same reason. A standalone combining mark still joins and matches.
+- Accents are dropped before matching, so an English claim spelled with an accent (`guarant\u00e9e`) still matches. Accented non-English copy that folds onto a term (French `assur\u00e9`) is a hit too; in the job the model judge classifies it, so it fails closed rather than open.
 - Prompt injection into the model judge stays unproven (see the first item).
 - A cited file or commit is checked for existing, not for proving the claim. A regular file with a plausible name that says nothing cites.
 - Claims in a repo whose public copy lives outside the default scope are not seen until the caller sets `claims_paths`.

@@ -530,10 +530,6 @@ def check(diff, lexicon, globs, dirs, evidence, exclude=()):
         seen = set()
 
         def add(a, b, term, cat):
-            # A word with a precomposed accent is not the English term it
-            # matches once accents are stripped ("assur\u00e9").
-            if cat != 'obfuscation' and any(row['accented'][max(a, 0):b]):
-                return
             key = (a, b, cat, term.lower())
             if key not in seen:
                 seen.add(key)
