@@ -77,6 +77,48 @@ def run_repo(files, *extra, base='base\n', evidence=None):
     return proc
 
 
+def build(base_files, head_files, base_links=None, side=None, head_links=None):
+    """Flexible repo builder. Returns (diff, root, info). The diff is
+    `git diff --cached HEAD` of the head edit (new files included). info has
+    base, head and side commit ids. The repo lives until the module ends."""
+    tmp = tempfile.TemporaryDirectory()
+    _KEPT.append(tmp)
+    root = Path(tmp.name)
+    git(root, 'init', '-q', '-b', 'main')
+
+    def write(files, links):
+        for rel, content in (files or {}).items():
+            p = root / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            if p.is_symlink() or p.exists():
+                p.unlink()
+            if isinstance(content, bytes):
+                p.write_bytes(content)
+            else:
+                p.write_text(content)
+        for rel, target in (links or {}).items():
+            p = root / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            os.symlink(target, p)
+    write(base_files, base_links)
+    git(root, *IDENT, 'add', '-A')
+    git(root, *IDENT, 'commit', '-q', '-m', 'base')
+    info = {'base': git(root, 'rev-parse', 'HEAD').strip()}
+    if side:
+        git(root, 'switch', '-q', '-c', 'side')
+        write(side, None)
+        git(root, *IDENT, 'add', '-A')
+        git(root, *IDENT, 'commit', '-q', '-m', 'side')
+        info['side'] = git(root, 'rev-parse', 'HEAD').strip()
+        git(root, 'switch', '-q', 'main')
+    write(head_files, head_links)
+    git(root, *IDENT, 'add', '-A')
+    diff = git(root, 'diff', '--cached', 'HEAD', '--unified=3')
+    git(root, *IDENT, 'commit', '-q', '-m', 'head')
+    info['head'] = git(root, 'rev-parse', 'HEAD').strip()
+    return diff, root, info
+
+
 def run(diff_text, *extra, cwd=None, env=None):
     proc = subprocess.run([sys.executable, str(SCRIPT), *extra],
                           input=diff_text.encode('utf-8', 'surrogateescape'),
@@ -438,6 +480,57 @@ class UrlEvidence(unittest.TestCase):
         # A closed local port: a fetch would be refused, not accepted. The host
         # is listed, so the URL cites without any request.
         self.assertTrue(self.cite('https://127.0.0.1/never', hosts='127.0.0.1'))
+
+
+class EvidenceRules(unittest.TestCase):
+    CLAIM = 'We guarantee it. claims: proven %s\n'
+
+    def rc(self, evidence, base_files=None, head_files=None, extra=(), **kw):
+        base_files = {'docs/x.md': 'evidence\n', 'site/a.md': 'x\n', **(base_files or {})}
+        head_files = {'site/a.md': self.CLAIM % evidence, **(head_files or {})}
+        diff, root, info = build(base_files, head_files, **kw)
+        proc = run(diff, '--repo', str(root), '--base', info['base'], *extra)
+        return proc.returncode
+
+    def test_control_regular_base_file_cites(self):
+        self.assertEqual(self.rc('docs/x.md'), 0)
+
+    def test_claims_own_file_does_not_cite(self):
+        self.assertEqual(self.rc('site/a.md'), 1)
+
+    def test_file_the_pr_changes_does_not_cite(self):
+        self.assertEqual(self.rc('docs/x.md', head_files={'docs/x.md': 'changed\n'}), 1)
+
+    def test_file_the_pr_adds_does_not_cite(self):
+        self.assertEqual(self.rc('docs/new.md', head_files={'docs/new.md': 'new evidence\n'}), 1)
+
+    def test_directory_empty_file_and_symlink_do_not_cite(self):
+        base = {'docs/sub/f.md': 'e\n', 'docs/empty.md': ''}
+        self.assertEqual(self.rc('docs/sub', base_files=base), 1)
+        self.assertEqual(self.rc('docs/empty.md', base_files=base), 1)
+        self.assertEqual(self.rc('docs/link.md', base_links={'docs/link.md': 'x.md'}), 1)
+
+    def test_sha_must_be_reachable_from_base(self):
+        diff, root, info = build({'docs/x.md': 'e\n', 'site/a.md': 'x\n'},
+                                 {'site/a.md': 'We guarantee it. claims: proven HEAD1\n'},
+                                 side={'other.txt': 'side\n'})
+        for name, ok in (('base', True), ('side', False), ('head', False)):
+            with self.subTest(sha=name):
+                proc = run(diff.replace('HEAD1', info[name]), '--repo', str(root),
+                           '--base', info['base'])
+                self.assertEqual(proc.returncode, 0 if ok else 1, proc.stdout + proc.stderr)
+
+    def test_without_base_nothing_resolves(self):
+        diff, root, info = build({'docs/x.md': 'e\n', 'site/a.md': 'x\n'},
+                                 {'site/a.md': self.CLAIM % 'docs/x.md'})
+        self.assertEqual(run(diff, '--repo', str(root)).returncode, 1)
+
+    def test_evidence_paths_globs(self):
+        base = {'docs/bench/a.md': 'b\n'}
+        args = ('--evidence-paths', 'docs/bench/*.md, legal/*.pdf')
+        self.assertEqual(self.rc('docs/x.md', base_files=base, extra=args), 1)
+        self.assertEqual(self.rc('docs/bench/a.md', base_files=base, extra=args), 0)
+        self.assertEqual(self.rc('docs/x.md', base_files=base), 0)
 
 
 class ClaimsJobShell(unittest.TestCase):
