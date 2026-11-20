@@ -812,5 +812,42 @@ class Round4(unittest.TestCase):
         self.passes('We offer bulletproof copy. claims: proven docs/x.md')
 
 
+    def sha_repo(self):
+        """Root commit r (README only), commit e (adds docs/evidence/e.md),
+        commit o (adds src/o.txt), then head. Returns (root, shas)."""
+        tmp = tempfile.TemporaryDirectory()
+        _KEPT.append(tmp)
+        root = Path(tmp.name)
+        git(root, 'init', '-q', '-b', 'main')
+        shas = {}
+        for name, rel in (('r', 'README'), ('e', 'docs/evidence/e.md'), ('o', 'src/o.txt'),
+                          ('d', 'site/a.md')):
+            p = root / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(name + '\n')
+            git(root, *IDENT, 'add', '-A')
+            git(root, *IDENT, 'commit', '-q', '-m', name)
+            shas[name] = git(root, 'rev-parse', '--short=10', 'HEAD').strip()
+        return root, shas
+
+    def cite_sha(self, name, *extra):
+        root, shas = self.sha_repo()
+        text = 'We guarantee it. claims: proven %s\n' % shas[name]
+        (root / 'site/a.md').write_text(text)
+        diff = git(root, 'diff', 'HEAD', '--unified=3')
+        proc = run(diff, '--repo', str(root), '--base', 'HEAD', *extra)
+        return proc.returncode
+
+    def test_nc_a_commit_must_touch_an_evidence_path(self):
+        globs = ('--evidence-paths', 'docs/evidence/**,evidence/**')
+        self.assertEqual(self.cite_sha('e', *globs), 0)
+        self.assertEqual(self.cite_sha('o', *globs), 1)
+        self.assertEqual(self.cite_sha('r', *globs), 1)
+
+    def test_nc_the_root_commit_never_cites(self):
+        self.assertEqual(self.cite_sha('r'), 1)
+        self.assertEqual(self.cite_sha('o'), 0)
+
+
 if __name__ == '__main__':
     unittest.main()
