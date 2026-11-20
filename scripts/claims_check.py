@@ -270,22 +270,48 @@ EMPHASIS = re.compile(r'(?<=[^\W\d_])[*_`]+(?=[^\W\d_])')
 WORD = re.compile(r'[^\W_]+')
 
 
+def _latin_letter(ch):
+    return ch.isalpha() and unicodedata.name(ch, '').startswith('LATIN')
+
+
 def pre(text):
     """html.unescape, then per character NFKD with marks, format characters and
-    blank-rendering characters dropped. Returns (text, odd) where `odd` holds
-    obfuscation terms (format or blank-rendering characters). Combining marks
-    are dropped without a hit: they are ordinary in accented copy."""
+    blank-rendering characters dropped. Returns (text, odd, accented):
+    `odd` holds obfuscation terms; `accented[i]` is True when output character i
+    came from a precomposed accented letter (a standalone combining mark does
+    not count, so `guar` + U+0301 + `antee` still hides nothing).
+
+    A zero-width joiner or non-joiner is an obfuscation term only when a Latin
+    letter sits on both sides of it (emoji sequences and Persian text use them
+    legitimately). Any other format or blank-rendering character always is.
+    Combining marks are dropped without a hit: they are ordinary in accented
+    copy."""
     terms = []
     out = []
-    for c in html.unescape(text):
-        for d in unicodedata.normalize('NFKD', c):
+    accented = []
+    src = html.unescape(text)
+
+    def near(k, step):
+        k += step
+        while 0 <= k < len(src) and unicodedata.category(src[k]) == 'Cf':
+            k += step
+        return src[k] if 0 <= k < len(src) else ''
+
+    for k, c in enumerate(src):
+        ds = unicodedata.normalize('NFKD', c)
+        marks = unicodedata.category(c) not in ('Mn', 'Me') and any(
+            unicodedata.category(d) == 'Mn' for d in ds)
+        for d in ds:
             cat = unicodedata.category(d)
             if cat == 'Cf' or ord(d) in BLANKS:
+                if d in '\u200c\u200d' and not (_latin_letter(near(k, -1)) and _latin_letter(near(k, 1))):
+                    continue
                 if not terms:
                     terms.append('zero-width or format character')
             elif cat not in ('Mn', 'Me'):
                 out.append(d)
-    return ''.join(out), terms
+                accented.append(marks)
+    return ''.join(out), terms, accented
 
 
 def delete(text, idx, spans):
@@ -327,17 +353,17 @@ def fold(text, terms):
 
 
 def normalise(text):
-    """Return (s2, views, obfuscation_terms) for one added line.
+    """Return (s2, views, obfuscation_terms, accented) for one added line.
 
     s2: the line after `pre`; markers are found in it. views: two (scan, idx)
     pairs, matched together and deduplicated. The first is s2 with markup
     stripped, so fragments join; the second is s2 as it stands, so text inside
     a tag (an attribute value) is still seen. Both fold look-alikes to Latin
     and keep whitespace. idx[i] is the s2 position of scan[i]."""
-    s2, terms = pre(text)
+    s2, terms, accented = pre(text)
     stripped, idx = strip_markup(s2)
     views = [(fold(stripped, terms), idx), (fold(s2, terms), list(range(len(s2))))]
-    return s2, views, list(dict.fromkeys(terms))
+    return s2, views, list(dict.fromkeys(terms)), accented
 
 
 def in_scope(path, globs, dirs, exclude=()):
@@ -492,11 +518,11 @@ def check(diff, lexicon, globs, dirs, evidence, exclude=()):
         if '\x00' in text or '�' in text:
             hits.append(make_hit(path, line_no, 'undecodable text', 'undecodable', 'unreadable'))
             continue
-        s2, views, odd = normalise(text)
+        s2, views, odd, accented = normalise(text)
         spans = marker_spans(s2, evidence)
         rows.append({'path': path, 'no': line_no, 'hunk': hunk, 'shown': shown, 's2': s2,
                      'views': [(blank_scan(scan, idx, spans), idx) for scan, idx in views],
-                     'spans': spans, 'odd': odd})
+                     'spans': spans, 'odd': odd, 'accented': accented})
     lines = {}
     for n, row in enumerate(rows):
         path, line_no, shown = row['path'], row['no'], row['shown']
@@ -504,6 +530,10 @@ def check(diff, lexicon, globs, dirs, evidence, exclude=()):
         seen = set()
 
         def add(a, b, term, cat):
+            # A word with a precomposed accent is not the English term it
+            # matches once accents are stripped ("assur\u00e9").
+            if cat != 'obfuscation' and any(row['accented'][max(a, 0):b]):
+                return
             key = (a, b, cat, term.lower())
             if key not in seen:
                 seen.add(key)
