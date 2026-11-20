@@ -464,6 +464,14 @@ def make_hit(path, line_no, shown, term, cat):
             'category': cat, 'cited': False}
 
 
+def cite_claim(cluster):
+    """Cite the longest (a, b, hit) of the cluster and the hits that overlap it."""
+    la, lb, _ = max(cluster, key=lambda c: c[1] - c[0])
+    for a, b, h in cluster:
+        if (a < lb and b > la) or (a, b) == (la, lb):
+            h['cited'] = True
+
+
 def check(diff, lexicon, globs, dirs, evidence, exclude=()):
     hits = []
     events = list(parse_added(diff))
@@ -531,15 +539,16 @@ def check(diff, lexicon, globs, dirs, evidence, exclude=()):
         end = None
         for a, b, h in found:
             if clusters and end is not None and a < end:
-                clusters[-1][0].append(h)
+                clusters[-1][0].append((a, b, h))
                 end = max(end, b)
             else:
-                clusters.append(([h], a))
+                clusters.append(([(a, b, h)], a))
                 end = b
         lines[(path, line_no)] = (clusters, row['spans'], bool(STANDALONE.match(row['s2'])))
         hits.extend(h for _, _, h in found)
-    # A marker cites exactly one claim: one cluster of overlapping hits (for
-    # example `99.99%` and `99.99% uptime` are the same words). A marker alone
+    # A marker cites exactly one claim: the longest hit of the nearest cluster
+    # plus the hits that overlap that hit directly (`99.99%` and `99.99% uptime`
+    # are the same words). Overlap does not chain. A marker alone
     # on its line cites the first claim on the next added line; any other
     # marker cites only the nearest claim before it on its own line.
     for (path, line_no), (clusters, spans, standalone) in lines.items():
@@ -549,13 +558,11 @@ def check(diff, lexicon, globs, dirs, evidence, exclude=()):
             if not standalone:
                 before = [c for c, pos in clusters if pos < start]
                 if before:
-                    for h in before[-1]:
-                        h['cited'] = True
+                    cite_claim(before[-1])
             else:
                 nxt = lines.get((path, line_no + 1))
                 if nxt and nxt[0]:
-                    for h in nxt[0][0][0]:
-                        h['cited'] = True
+                    cite_claim(nxt[0][0][0])
     return {'hits': hits, 'uncited': sum(1 for h in hits if not h['cited'])}
 
 
