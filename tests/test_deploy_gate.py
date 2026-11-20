@@ -143,8 +143,9 @@ class Range(unittest.TestCase):
         cls.api.server.shutdown()
         cls.tmp.cleanup()
 
-    def run_range(self, environment='web-prod', base_sha='', deployments=None, status=200):
+    def run_range(self, environment='web-prod', base_sha='', deployments=None, status=200, head=None):
         self.api.deployments, self.api.status, self.api.seen = deployments or {}, status, []
+        git(self.root, 'checkout', '-q', '--detach', head or self.shas[-1])
         out = Path(self.tmp.name) / 'out'
         out.write_text('')
         env = {**GIT_ENV, 'API_URL': self.api.url, 'REPO': 'o/r', 'GATE_TOKEN': 'fixture',
@@ -171,10 +172,51 @@ class Range(unittest.TestCase):
         self.assertIn('base_sha', log)
         self.assertNotIn('base', out)
 
-    def test_base_sha_input_is_used_without_the_api(self):
-        rc, out, log = self.run_range(base_sha=self.shas[0], status=500)
+    def test_base_sha_is_used_only_when_no_deployment_exists(self):
+        rc, out, log = self.run_range(base_sha=self.shas[0])
         self.assertEqual(rc, 0, log)
         self.assertEqual(out.get('base'), self.shas[0])
+
+    def test_base_sha_never_skips_the_api(self):
+        rc, out, _ = self.run_range(base_sha=self.shas[0], status=500)
+        self.assertNotEqual(rc, 0)
+        self.assertNotIn('base', out)
+
+    def test_base_sha_is_ignored_when_a_deployment_exists(self):
+        # Assurance finding 1: an input must not override the history.
+        a, b, c = self.shas
+        rc, out, log = self.run_range(base_sha=c, deployments={'web-prod': [(2, a, 'success')]})
+        self.assertEqual(rc, 0, log)
+        self.assertEqual(out.get('base'), a)
+        self.assertIn('base_sha ignored', log)
+
+    def test_base_sha_must_be_a_strict_ancestor(self):
+        a, b, c = self.shas
+        for head, base in ((c, c), (b, c)):
+            with self.subTest(head=head[:7], base=base[:7]):
+                rc, out, _ = self.run_range(base_sha=base, head=head)
+                self.assertNotEqual(rc, 0)
+                self.assertNotIn('base', out)
+
+    def test_rollback_starts_at_the_newest_deployed_ancestor(self):
+        # A re-run of an old commit after a newer deploy: b was never deployed.
+        a, b, c = self.shas
+        rc, out, log = self.run_range(head=b, deployments={'web-prod': [(3, c, 'success'), (1, a, 'success')]})
+        self.assertEqual(rc, 0, log)
+        self.assertEqual((out.get('base'), out.get('sha')), (a, b))
+
+    def test_rollback_to_a_deployed_commit_has_an_empty_range(self):
+        a, b, c = self.shas
+        rc, out, log = self.run_range(head=b, deployments={'web-prod': [(3, c, 'success'), (2, b, 'success')]})
+        self.assertEqual(rc, 0, log)
+        self.assertEqual(out.get('base'), b)
+
+    def test_no_deployed_ancestor_and_no_base_sha_fails_closed(self):
+        a, b, c = self.shas
+        rc, out, log = self.run_range(head=b, deployments={'web-prod': [(3, c, 'success')]})
+        self.assertNotEqual(rc, 0)
+        self.assertIn('base_sha', log)
+        self.assertNotIn('base', out)
 
     def test_malformed_base_sha_fails_closed(self):
         for bad in ('main', self.shas[0][:12], self.shas[0] + '; true', 'HEAD~1'):
