@@ -56,6 +56,20 @@
     {"term": "refunds", "category": "liability"},
     {"term": "compensate", "category": "liability"},
     {"term": "compensation", "category": "liability"},
-    {"term": "legally binding", "category": "liability"}
+    {"term": "legally binding", "category": "liability"},
+    {"term": "money-back", "category": "liability"},
+    {"term": "hold harmless", "category": "liability"},
+    {"term": "hold you harmless", "category": "liability"},
+
+    {"term": "zero risk", "category": "absolute"},
+    {"term": "risk-free", "category": "absolute"},
+    {"term": "will not fail", "category": "absolute"},
+    {"term": "won['\\u2019]t fail", "category": "absolute", "regex": true},
+    {"term": "military-grade", "category": "absolute"},
+    {"term": "bank-grade", "category": "absolute"},
+    {"term": "HITRUST", "category": "certification"},
+    {"term": "five nines", "category": "metric"},
+    {"term": "\\d+\\s+nines", "category": "metric", "regex": true},
+    {"term": "\\d+\\.\\d+\\s*%", "category": "metric", "regex": true}
   ]
 }
