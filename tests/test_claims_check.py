@@ -907,5 +907,24 @@ class Round4(unittest.TestCase):
         self.passes('99.99% uptime. claims: proven docs/x.md')
 
 
+    def test_fp_joiners_between_non_latin_letters_are_clean(self):
+        self.passes('Family: \U0001F468‍\U0001F469‍\U0001F467 at home.')
+        self.passes('می‌خواهم کتاب')
+
+    def test_fp_joiners_between_latin_letters_are_an_obfuscation_hit(self):
+        for cp in ('‍', '‌'):
+            with self.subTest(cp=hex(ord(cp))):
+                out = self.fails('We gua%srantee it.' % cp)
+                self.assertIn('obfuscation', {h['category'] for h in out['hits']})
+        out = self.fails('Plain a‍b word.')
+        self.assertEqual({h['category'] for h in out['hits']}, {'obfuscation'})
+
+    def test_fp_french_accented_word_is_not_an_english_term(self):
+        self.passes('Il est assuré de sa réussite.')
+        self.passes('Elle est assurée.')
+        self.fails('We assure you.')
+        self.fails('We guaŕantee it.')
+
+
 if __name__ == '__main__':
     unittest.main()
