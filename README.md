@@ -97,7 +97,7 @@ The job is a new check, `claims check`. Add it to branch protection only after a
 
 ## Deploy gate
 
-`deploy-gate.yml` runs the claims check on everything a deploy ships. The range starts at the newest successful deployment of the caller's environment and ends at the commit being deployed. GitHub records a deployment for every job that uses an environment, so the gate keeps no state of its own. The check always enforces; the gate has no `claims_mode` input.
+`deploy-gate.yml` runs the claims check on everything a deploy ships. The range starts at the newest successful deployment of the caller's environment whose commit is an ancestor of, or equal to, the commit being deployed, and ends at that commit. A newer deployment that is not an ancestor, as in a rollback, is skipped, so a commit that was never deployed is checked from the deployed commit before it. GitHub records a deployment for every job that uses an environment, so the gate keeps no state of its own. The check always enforces; the gate has no `claims_mode` input.
 
 The approval is the environment on the caller's deploy job (TASK-0823, option A). The reviewer approves the job that holds the deploy credentials, after the gate has run in the same workflow run. The gate's step summary shows the environment, the last deployed commit, the commit being deployed, the number of commits in the range and the effective claims settings.
 
@@ -126,8 +126,8 @@ Set up the environment `<unit>-prod` like `cortex-prod`:
 - deployment branches limited to protected branches;
 - the deploy credentials stored as environment secrets, not repo secrets.
 
-A first deploy has no deployment to start from. Pass `base_sha` once, as a full 40-character SHA, for example the last commit that is already live. The gate fails closed in each of these cases:
-- no successful deployment is found and no `base_sha` is given;
+A first deploy has no deployment to start from. Pass `base_sha` once, as a full 40-character SHA, for example the last commit that is already live. It must be a strict ancestor of the commit being deployed. The gate uses it only when no successful deployment is an ancestor; otherwise it ignores it with a warning, so wiring `base_sha` to a dispatch input cannot shorten the range. The gate fails closed in each of these cases:
+- no successful deployment at an ancestor is found and no usable `base_sha` is given;
 - the deployments API refuses the request, for example when the caller did not grant `deployments: read`;
 - the base commit is not in the repository's history;
 - the environment name has characters other than letters, digits, `.`, `_` and `-`.
@@ -138,7 +138,10 @@ Limits:
 - A caller can drop `needs: gate` only by landing a workflow change on `main`. The approval still applies, because it belongs to the environment, but the claims check would not run. A reviewer should see the `gate / claims check` job in the run before approving.
 - GitHub lets a required reviewer's token approve through the API, and agents on ceres hold that token. The approval stops accidents, not a rogue agent. It moves to a reflex RED card once reflexd is reachable from CI runners (TASK-0823).
 - Every successful deployment of the environment moves the base, whichever workflow made it.
-- The range is `git diff base...sha`. A rollback to an older commit has an empty range and passes.
+- A rollback to a commit that was itself deployed has an empty range and passes.
+- Anyone holding a token with `deployments: write` in the repository, including a workflow on a branch that asks for it, can create a deployment with a success status and so move the base. GitHub's documentation does not say that environment protection applies to deployments created through the API. A tamper-evident record of each gate pass replaces deployment statuses when the approval moves to a reflex RED card (TASK-0823).
+- Do not give the deploy job `if: always()` or `if: ${{ !cancelled() }}`: with either, it runs after a failed or skipped gate.
+- The gate checks this repository out at `.jury-tools` in the workspace. A caller that tracks a path of that name gets a checkout error.
 
 ## Pinning and releases
 
