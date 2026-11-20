@@ -20,7 +20,8 @@ IDENT = ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid',
 
 def git(root, *args):
     return subprocess.run(['git', '-C', str(root), *args], env=GIT_ENV,
-                          check=True, capture_output=True, text=True).stdout
+                          check=True, capture_output=True, text=True,
+                          errors='surrogateescape').stdout
 
 
 def make_diff(files, base='base\n'):
@@ -35,13 +36,20 @@ def make_diff(files, base='base\n'):
         git(root, *IDENT, 'add', '-A')
         git(root, *IDENT, 'commit', '-q', '-m', 'base')
         for rel, content in files.items():
-            (root / rel).write_text(content)
+            if isinstance(content, bytes):
+                (root / rel).write_bytes(content)
+            else:
+                (root / rel).write_text(content)
         return git(root, 'diff', 'HEAD', '--unified=3')
 
 
-def run(diff_text, *extra):
-    return subprocess.run([sys.executable, str(SCRIPT), *extra], input=diff_text,
-                          capture_output=True, text=True)
+def run(diff_text, *extra, cwd=None, env=None):
+    proc = subprocess.run([sys.executable, str(SCRIPT), *extra],
+                          input=diff_text.encode('utf-8', 'surrogateescape'),
+                          capture_output=True, cwd=cwd, env=env)
+    proc.stdout = proc.stdout.decode('utf-8', 'replace')
+    proc.stderr = proc.stderr.decode('utf-8', 'replace')
+    return proc
 
 
 class ClaimsCheck(unittest.TestCase):
@@ -138,6 +146,52 @@ class ClaimsCheck(unittest.TestCase):
                               capture_output=True, text=True)
         self.assertEqual(proc.returncode, 2)
         self.assertIn('bad input', proc.stderr)
+
+
+class Unreadable(unittest.TestCase):
+    def test_utf16_in_public_path_is_a_hit(self):
+        text = 'We guarantee it.\n'.encode('utf-16')
+        diff = make_diff({'site/a.md': text, 'docs/b.md': 'fine\n'})
+        proc = run(diff)
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        out = json.loads(proc.stdout)
+        self.assertIn('unreadable', {h['category'] for h in out['hits']})
+        self.assertEqual({h['file'] for h in out['hits']}, {'site/a.md'})
+
+    def test_nul_byte_in_public_path_is_a_hit(self):
+        diff = make_diff({'site/a.md': b'We guarantee it.\x00\n'})
+        proc = run(diff)
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn('unreadable', {h['category'] for h in json.loads(proc.stdout)['hits']})
+
+    def test_undecodable_text_in_public_path_is_a_hit(self):
+        diff = make_diff({'site/a.md': b'caf\xe9 plain latin-1 text\n'})
+        proc = run(diff)
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn('unreadable', {h['category'] for h in json.loads(proc.stdout)['hits']})
+
+    def test_binary_outside_scope_exits_0(self):
+        diff = make_diff({'bin/x.dat': b'\x00\x01\x02\n'})
+        proc = run(diff)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(json.loads(proc.stdout), {'hits': [], 'uncited': 0})
+
+    def test_pure_rename_and_mode_change_exit_0(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            git(root, 'init', '-q')
+            (root / 'a.txt').write_text('line one\nline two\nline three\n')
+            (root / 'run.sh').write_text('x\n')
+            git(root, *IDENT, 'add', '-A')
+            git(root, *IDENT, 'commit', '-q', '-m', 'base')
+            git(root, 'mv', 'a.txt', 'b.txt')
+            os.chmod(root / 'run.sh', 0o755)
+            git(root, 'add', '-A')
+            diff = git(root, 'diff', '--cached', '-M')
+        self.assertNotIn('@@', diff)
+        proc = run(diff)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(json.loads(proc.stdout), {'hits': [], 'uncited': 0})
 
 
 class ClaimsJobShell(unittest.TestCase):
