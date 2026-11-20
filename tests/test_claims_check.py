@@ -960,3 +960,24 @@ class Round4(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class WorkflowCallBlock(unittest.TestCase):
+    """GitHub rejects the whole workflow at startup when an expression appears
+    where no context is available, such as an input description. A caller saw
+    this as a run with zero jobs ("workflow file issue", vilicus#294)."""
+
+    def test_no_expression_outside_output_values(self):
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            '.github', 'workflows', 'agent-jury.yml')
+        block, bad = False, []
+        with open(path, encoding='utf-8') as f:
+            for n, line in enumerate(f, 1):
+                if line.strip() == 'workflow_call:':
+                    block = True
+                    continue
+                if block and line.startswith('jobs:'):
+                    break
+                if block and '${{' in line and not line.strip().startswith('value:'):
+                    bad.append('%d: %s' % (n, line.strip()))
+        self.assertEqual(bad, [], 'expressions in the workflow_call block')
