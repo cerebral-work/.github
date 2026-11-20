@@ -202,13 +202,14 @@ on:
         default: ''
       claims_evidence_paths:
         description: >-
-          Comma-separated globs. When set, a path cited as `claims: proven
-          <path>` evidence in the `claims check` job must match one of them.
-          Empty (the default) means any path. A cited path must also be a
-          regular, non-empty file at the base branch tip, and not a file the
-          PR changes.
+          Comma-separated globs. A path cited as `claims: proven <path>`
+          evidence in the `claims check` job must match one of them. The
+          default allows only `evidence/` and `docs/evidence/`, so an ordinary
+          file such as README.md never counts as evidence. Pass an empty
+          string to allow any path. A cited path must also be a regular,
+          non-empty file at the base branch tip, and not a file the PR changes.
         type: string
-        default: ''
+        default: 'evidence/**,docs/evidence/**'
     secrets:
       AGENT_JURY_API_KEY:
         description: >-
