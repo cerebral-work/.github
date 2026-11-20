@@ -250,6 +250,57 @@ class Lexicon(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
 
 
+ZW = chr(0x200b)
+SHY = chr(0x00ad)
+CYR_A = chr(0x0430)
+GREEK_O = chr(0x03bf)
+
+
+class Obfuscation(unittest.TestCase):
+    def hits(self, text, code=1):
+        proc = run(make_diff({'site/a.md': text + '\n'}))
+        self.assertEqual(proc.returncode, code, repr(text) + proc.stdout + proc.stderr)
+        return json.loads(proc.stdout)['hits']
+
+    def test_lexicon_matches_after_normalisation(self):
+        cases = {
+            'gua' + ZW + 'rantee': 'guarantee',
+            'guar' + SHY + 'antee': 'guarantee',
+            'gu' + CYR_A + 'rantee': 'guarantee',
+            '&#103;uarantee': 'guarantee',
+            chr(0xff11) + chr(0xff10) + chr(0xff10) + chr(0xff05) + ' uptime': 'metric',
+            '100%secure': 'absolute',
+            'fully  secure': 'absolute',
+            'fully-secure': 'absolute',
+            'fully\tsecure': 'absolute',
+            'zero-risk': 'absolute',
+        }
+        for text, cat in cases.items():
+            with self.subTest(text=text):
+                self.assertIn(cat, {h['category'] for h in self.hits(text)})
+
+    def test_original_text_is_reported(self):
+        hits = self.hits('We say fully-secure here.')
+        self.assertEqual(hits[0]['text'], 'We say fully-secure here.')
+
+    def test_zero_width_or_soft_hyphen_line_is_an_obfuscation_hit(self):
+        for text in ('Nice ' + ZW + 'word.', 'Nice wo' + SHY + 'rd.', chr(0xfeff) + 'Plain.'):
+            with self.subTest(text=text):
+                self.assertIn('obfuscation', {h['category'] for h in self.hits(text)})
+
+    def test_mixed_script_word_is_an_obfuscation_hit(self):
+        for text in ('The w' + CYR_A + 'rd is odd.', 'The w' + GREEK_O + 'rd is odd.'):
+            with self.subTest(text=text):
+                self.assertIn('obfuscation', {h['category'] for h in self.hits(text)})
+
+    def test_plain_non_latin_text_is_clean(self):
+        self.hits(chr(0x043f) + chr(0x0440) + chr(0x0438) + chr(0x0432) + chr(0x0435) + chr(0x0442), code=0)
+        self.hits('Caf' + chr(0xe9) + ' menu.', code=0)
+
+    def test_hyphenated_ordinary_words_are_clean(self):
+        self.hits('A well-known, easy-to-read page.', code=0)
+
+
 class ClaimsJobShell(unittest.TestCase):
     """Run the real `claims` job shell against a local fake gateway."""
 
