@@ -13,9 +13,11 @@ exit 0 no uncited hits, 1 uncited hits, 2 bad input (fail closed).
 Python 3 stdlib only.
 """
 import fnmatch
+import html
 import json
 import re
 import sys
+import unicodedata
 from pathlib import Path
 
 DEFAULT_GLOBS = ['*.md', '*.mdx', '*.markdown', '*.rst', '*.html', '*.htm',
@@ -24,6 +26,16 @@ DEFAULT_DIRS = ['site', 'web', 'docs', 'public', 'legal', 'privacy', 'terms',
                 'pricing', 'landing']
 MAX_INPUT_BYTES = 32 * 1024 * 1024
 MAX_LINE_CHARS = 2000
+# Whitespace or hyphens between the words of a term: "fully-secure",
+# "fully  secure" and "fully secure" are the same phrase.
+SEP = r'[\s\-]+'
+# Cyrillic and Greek letters that look like Latin ones. Folded to Latin only
+# inside a word that mixes scripts.
+CONFUSABLE = {
+    0x0430: 'a', 0x0435: 'e', 0x043e: 'o', 0x0440: 'p', 0x0441: 'c', 0x0445: 'x',
+    0x0443: 'y', 0x0456: 'i', 0x0458: 'j', 0x0455: 's', 0x04bb: 'h', 0x043a: 'k',
+    0x03bf: 'o', 0x03b1: 'a', 0x03b9: 'i', 0x03bd: 'v', 0x03c1: 'p', 0x03c5: 'u',
+}
 
 HUNK = re.compile(r'^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@')
 MARKER = re.compile(r'claims:\s*proven\b[ \t]*(\S*)', re.IGNORECASE)
@@ -59,15 +71,49 @@ def load_lexicon(path):
             if not isinstance(term, str) or not term or not isinstance(cat, str):
                 raise ValueError('entry needs a term and a category')
             if e.get('regex'):
-                body = term
+                body = term.replace(' ', SEP)
             else:
-                body = re.escape(term)
-            compiled.append((term, cat, re.compile(r'(?<!\w)(?:' + body + r')(?!\w)', re.IGNORECASE)))
+                body = SEP.join(re.escape(w) for w in re.split(r'[\s\-]+', term) if w)
+            head = r'(?<!\w)' if (e.get('regex') or term[0].isalnum()) else ''
+            tail = r'(?!\w)' if (e.get('regex') or term[-1].isalnum()) else ''
+            compiled.append((term, cat, re.compile(head + '(?:' + body + ')' + tail, re.IGNORECASE)))
         if not compiled:
             raise ValueError('empty lexicon')
         return compiled
     except (OSError, ValueError, KeyError, TypeError, re.error) as exc:
         raise BadInput('lexicon %s: %s' % (path, exc))
+
+
+def script_of(ch):
+    if not ch.isalpha():
+        return None
+    word = unicodedata.name(ch, '').split(' ')[0]
+    return word if word in ('LATIN', 'CYRILLIC', 'GREEK') else 'OTHER'
+
+
+def normalise(text):
+    """Return (match_text, obfuscation_terms) for one added line.
+
+    Steps: html.unescape, NFKC, drop format characters (zero-width, soft
+    hyphen, BOM), fold look-alike letters in mixed-script words, collapse
+    whitespace. Mixed-script words and format characters are obfuscation.
+    """
+    terms = []
+    t = unicodedata.normalize('NFKC', html.unescape(text))
+    if any(unicodedata.category(c) == 'Cf' for c in html.unescape(text) + t):
+        terms.append('zero-width or format character')
+    t = ''.join(c for c in t if unicodedata.category(c) != 'Cf')
+
+    def fold(m):
+        word = m.group(0)
+        scripts = {script_of(c) for c in word} - {None}
+        if 'LATIN' in scripts and scripts & {'CYRILLIC', 'GREEK'}:
+            terms.append(word)
+            return ''.join(CONFUSABLE.get(ord(c), c) for c in word)
+        return word
+
+    t = re.sub(r'\w+', fold, t)
+    return re.sub(r'\s+', ' ', t), terms
 
 
 def in_scope(path, globs, dirs):
@@ -176,11 +222,15 @@ def check(diff, lexicon, globs, dirs):
                          'term': 'undecodable', 'category': 'unreadable', 'cited': False})
             continue
         cited = has_marker(text) or (prev is not None and has_marker(prev))
-        scan = MARKER.sub(' ', text)
+        norm, odd = normalise(text)
+        shown = text.strip()[:MAX_LINE_CHARS]
+        for term in odd:
+            hits.append({'file': path, 'line': line_no, 'text': shown,
+                         'term': term, 'category': 'obfuscation', 'cited': cited})
+        scan = MARKER.sub(' ', norm)
         for term, cat, rx in lexicon:
             for m in rx.finditer(scan):
-                hits.append({'file': path, 'line': line_no,
-                             'text': text.strip()[:MAX_LINE_CHARS],
+                hits.append({'file': path, 'line': line_no, 'text': shown,
                              'term': m.group(0), 'category': cat, 'cited': cited})
     return {'hits': hits, 'uncited': sum(1 for h in hits if not h['cited'])}
 
