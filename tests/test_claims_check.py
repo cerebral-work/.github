@@ -775,5 +775,37 @@ class ClaimsJobShell(unittest.TestCase):
         self.assertEqual(self.run_job('We guarantee it.\n', mode='report'), (0, 1))
 
 
+class Round4(unittest.TestCase):
+    """Round 4 breaks. Each case runs the real script on a real `git diff`."""
+    def rc(self, text, *extra, path='site/a.md', evidence=None):
+        proc = run_repo({path: text + '\n'}, *extra, evidence=evidence)
+        return proc.returncode, proc.stdout + proc.stderr
+
+    def fails(self, text, *extra, path='site/a.md', evidence=None):
+        rc, out = self.rc(text, *extra, path=path, evidence=evidence)
+        self.assertEqual(rc, 1, repr(text) + out)
+        return json.loads(out)
+
+    def passes(self, text, *extra, path='site/a.md', evidence=None):
+        rc, out = self.rc(text, *extra, path=path, evidence=evidence)
+        self.assertEqual(rc, 0, repr(text) + out)
+
+    def test_na_attribute_values_are_scanned(self):
+        for text, path in (('<Hero tagline="We guarantee it" />', 'site/a.mdx'),
+                           ('<img alt="100% secure and guaranteed">', 'site/a.md'),
+                           ('<meta content="Fully secure, guaranteed.">', 'site/a.md'),
+                           ('<Card text="HIPAA compliant" />', 'site/a.mdx'),
+                           ('<b We guarantee 100%.>', 'site/a.md')):
+            with self.subTest(text=text):
+                self.fails(text, path=path)
+
+    def test_na_quoted_gt_in_an_attribute_does_not_end_the_tag(self):
+        self.fails('guar<span title=">">antee')
+
+    def test_na_markup_still_joins_fragments(self):
+        self.fails('guar<b>antee')
+        self.passes('<img alt="A cat on a mat">')
+
+
 if __name__ == '__main__':
     unittest.main()
