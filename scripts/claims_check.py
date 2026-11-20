@@ -5,9 +5,12 @@ usage: claims_check.py [DIFF_FILE | -] [--scope GLOB ...] [--lexicon PATH]
                        [--repo DIR] [--url-hosts HOST,HOST]
 
 Reads a unified diff (file path, or stdin when omitted or "-"). Checks only
-added lines in files that match the scope. A hit is cited when the same line
-or the added line right before it carries `claims: proven <evidence>`, where
-evidence is a URL, a repo path or a commit SHA.
+added lines in files that match the scope. Each line is normalised first (HTML
+entities, NFKC, format characters, look-alike letters). A marker
+`claims: proven <evidence>` cites one claim when its evidence resolves: a path
+at HEAD of --repo, a commit in --repo, or an https URL whose host is in
+--url-hosts (never fetched). Without --repo or --url-hosts nothing of that
+kind resolves, so the marker does not cite.
 
 stdout: {"hits": [{file,line,text,term,category,cited}], "uncited": N}
 exit 0 no uncited hits, 1 uncited hits, 2 bad input (fail closed).
