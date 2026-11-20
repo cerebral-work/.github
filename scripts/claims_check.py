@@ -77,20 +77,52 @@ def in_scope(path, globs, dirs):
     return any(d in parts[:-1] for d in dirs)
 
 
+def header_path(raw):
+    """Best-effort b-side path of a `diff --git a/X b/Y` line."""
+    rest = raw[len('diff --git '):]
+    k = rest.rfind(' b/')
+    if k < 0:
+        return None
+    path = rest[k + 3:]
+    if path.startswith('"') and path.endswith('"'):
+        path = path[1:-1]
+    return path
+
+
 def parse_added(diff):
-    """Yield (file, line_no, text, prev_added_text_or_None) for each added line."""
+    """Yield ('line', file, line_no, text) per added line and
+    ('unreadable', file, reason) per binary change.
+
+    Pure renames, mode changes and deletions have no hunks and are valid.
+    """
+    seen_git = False
     seen_header = False
     seen_hunk = False
     in_hunk = False
     cur = None
+    git_path = None
+    deleted = False
+    reported = False
     new_no = 0
-    prev = None
     for raw in diff.split('\n'):
         if raw.startswith('diff --git '):
-            seen_header = True
+            seen_git = True
             in_hunk = False
             cur = None
-            prev = None
+            git_path = header_path(raw)
+            deleted = False
+            reported = False
+            continue
+        if not in_hunk and raw.startswith('deleted file mode'):
+            deleted = True
+            continue
+        if not in_hunk and raw.startswith('rename to '):
+            git_path = raw[len('rename to '):]
+            continue
+        if not in_hunk and (raw.startswith('Binary files ') or raw == 'GIT binary patch'):
+            if git_path and not deleted and not reported:
+                reported = True
+                yield 'unreadable', git_path, 'binary diff'
             continue
         if not in_hunk and raw.startswith('--- '):
             seen_header = True
@@ -101,35 +133,42 @@ def parse_added(diff):
                 cur = None
             else:
                 cur = target[2:] if target.startswith('b/') else target
-            prev = None
             continue
         m = HUNK.match(raw)
         if m:
             seen_hunk = True
             in_hunk = True
             new_no = int(m.group(1))
-            prev = None
             continue
         if cur is None or not seen_hunk:
             continue
         if raw.startswith('+'):
-            text = raw[1:]
-            yield cur, new_no, text, prev
-            prev = text
+            yield 'line', cur, new_no, raw[1:]
             new_no += 1
         elif raw.startswith(' '):
             new_no += 1
-            prev = None
-        elif raw.startswith('-') or raw.startswith('\\'):
-            continue
-    if not (seen_header and seen_hunk):
+    if not (seen_git or (seen_header and seen_hunk)):
         raise BadInput('not a unified diff (no file headers and hunks)')
 
 
 def check(diff, lexicon, globs, dirs):
     hits = []
-    for path, line_no, text, prev in parse_added(diff):
+    prev_key = prev_text = None
+    for ev in parse_added(diff):
+        if ev[0] == 'unreadable':
+            _, path, reason = ev
+            if in_scope(path, globs, dirs):
+                hits.append({'file': path, 'line': 0, 'text': reason,
+                             'term': reason, 'category': 'unreadable', 'cited': False})
+            continue
+        _, path, line_no, text = ev
+        prev = prev_text if prev_key == (path, line_no - 1) else None
+        prev_key, prev_text = (path, line_no), text
         if not in_scope(path, globs, dirs):
+            continue
+        if '\x00' in text or '\ufffd' in text:
+            hits.append({'file': path, 'line': line_no, 'text': 'undecodable text',
+                         'term': 'undecodable', 'category': 'unreadable', 'cited': False})
             continue
         cited = has_marker(text) or (prev is not None and has_marker(prev))
         scan = MARKER.sub(' ', text)
