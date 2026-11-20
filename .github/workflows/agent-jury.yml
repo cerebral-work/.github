@@ -182,14 +182,6 @@ on:
           summary. Any other value is treated as `enforce`.
         type: string
         default: enforce
-      claims_ref:
-        description: >-
-          Ref of cerebral-work/.github that supplies scripts/claims_check.py
-          and scripts/claims_lexicon.json to the claims job. A caller that
-          pins this workflow by SHA should pass the same SHA here, so the
-          script it runs is the script it pinned.
-        type: string
-        default: main
     secrets:
       AGENT_JURY_API_KEY:
         description: >-
@@ -780,12 +772,13 @@ jobs:
         with:
           fetch-depth: 0
 
-      # The script lives in this repo, not in the caller's. Public repo, so no
-      # token is needed.
-      - uses: actions/checkout@v7
+      # The script lives in this repo, not in the caller's. job.workflow_sha is
+      # the commit of this workflow file that the caller pinned, so the script
+      # that runs is the one at that commit, never a moving branch.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          repository: cerebral-work/.github
-          ref: ${{ inputs.claims_ref }}
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
           path: .jury-tools
           persist-credentials: false
 

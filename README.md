@@ -54,7 +54,7 @@ The evidence is a URL, a repo path or a commit SHA. A marker with no evidence do
 
 When a hit is uncited, the job asks the model to classify it as `proven` (the diff itself shows the evidence), `unverified`, `guarantee` or `liability`. With no uncited hit, the job passes and makes no model call. In `enforce` mode the job fails on any class except `proven`. It also fails when the model call fails or the answer is unusable, because it fails closed.
 
-The input `claims_mode` sets the mode. `enforce` is the default. `report` never fails and only writes the step summary. The result goes to the step summary, not to a PR comment. The input `claims_ref` is the ref of this repo that supplies the script and lexicon. It defaults to `main`. Pass the same SHA you pin for the workflow.
+The input `claims_mode` sets the mode. `enforce` is the default. `report` never fails and only writes the step summary. The result goes to the step summary, not to a PR comment. The job checks out the script and lexicon from this repo at `job.workflow_sha`, the commit of the workflow file the caller pinned.
 
 The job is a new check, `claims check`. Add it to branch protection only after a canary run.
 
