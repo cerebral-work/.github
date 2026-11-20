@@ -39,22 +39,37 @@ an estate-wide rollout.
 
 ## Claims check
 
-The `claims check` job flags unverified claims, guarantees and legal liabilities in public text. It reads only the lines a PR adds. It checks public-facing files: `*.md`, `*.mdx`, `*.html`, `*.astro`, `*.svelte`, `*.vue`, `*.tsx`, `*.jsx`, and anything under `site/`, `web/`, `docs/`, `public/`, `legal/`, `privacy/` or `terms/`. Code comments in other files are ignored.
+The `claims check` job flags unverified claims, guarantees and legal liabilities in public text. It reads only the lines a PR adds. It matches file names and directory names case-insensitively. It checks:
 
-`scripts/claims_check.py` matches the lexicon in `scripts/claims_lexicon.json`. The categories are `guarantee`, `certification`, `absolute`, `metric` and `liability`. It prints JSON and exits 0 (no uncited hit), 1 (uncited hits) or 2 (bad input, which fails closed). Run it by hand with `git diff origin/main...HEAD | python3 scripts/claims_check.py`.
+- extensions `.md`, `.mdx`, `.markdown`, `.rst`, `.html`, `.htm`, `.astro`, `.svelte`, `.vue`, `.tsx`, `.jsx`;
+- any file whose name starts with `README`, at any depth;
+- anything under `site/`, `web/`, `docs/`, `public/`, `legal/`, `privacy/`, `terms/`, `pricing/` or `landing/`.
 
-**Cite a claim** with a marker on the same line or the line before:
+Out of scope on purpose: `.yaml`, `.ts` and other code or config files outside those directories. Code comments there are ignored.
+
+`scripts/claims_check.py` matches the lexicon in `scripts/claims_lexicon.json`. The categories are `guarantee`, `certification`, `absolute`, `metric`, `liability`, `unreadable` and `obfuscation`. It prints JSON and exits 0 (no uncited hit), 1 (uncited hits) or 2 (bad input, which fails closed). Run it by hand with `git diff origin/main...HEAD | python3 scripts/claims_check.py --repo .`.
+
+Before matching, the script normalises each added line: `html.unescape`, Unicode NFKC, removal of format characters (zero-width characters, soft hyphen, BOM), and collapsing of whitespace and hyphens between the words of a term. The report shows the original line. Two more hits come from this step:
+
+- `obfuscation`: a line with a zero-width or other format character, or a word that mixes Latin with Cyrillic or Greek letters. Right-to-left marks also count as format characters, so a PR that adds them needs a marker.
+- `unreadable`: a binary, UTF-16, NUL-byte or non-UTF-8 diff that touches an in-scope path. A binary change outside scope is ignored. A diff with only renames, mode changes or deletions exits 0.
+
+**Cite a claim** with a marker:
 
 ```html
-<!-- claims: proven docs/bench/2026-11.md -->
-We cut p99 latency by 40%.
+We cut p99 latency by 40%. <!-- claims: proven docs/bench/2026-11.md -->
 ```
 
-The evidence is a URL, a repo path or a commit SHA. A marker with no evidence does not cite.
+- The marker token `claims:` must start the line or follow whitespace or a comment opener (`<!--`, `//`, `#`, `{/*`). `noclaims: proven x` is not a marker.
+- A marker cites one claim. A claim is a group of overlapping hits, for example `99.99%` and `99.99% uptime`. If the marker line has a hit, the marker cites the claim immediately before it on that line. If it has no hit, it cites the first claim on the next added line. Text inside the marker never cites itself.
+- Evidence must resolve, or the marker does not cite. A repo path must exist at the PR head (`git cat-file -e HEAD:<path>`). A commit SHA must name a commit in the repo. An https URL must have a host in the allowlist (input `claims_url_hosts`, default `github.com`). The host is compared exactly and case-insensitively. A URL with userinfo, an explicit port, an IP-literal host or a punycode host does not cite unless that host is listed exactly. Any other URL does not cite. The job never fetches a URL, because a 2xx answer shows only that a page exists, and a fetch would let a PR make the runner call any host.
+- The marker token is still `claims: proven <evidence>`. "Proven" in the token means the evidence resolves. It does not mean the check judged the claim true.
 
-When a hit is uncited, the job asks the model to classify it as `proven` (the diff itself shows the evidence), `unverified`, `guarantee` or `liability`. With no uncited hit, the job passes and makes no model call. In `enforce` mode the job fails on any class except `proven`. It also fails when the model call fails or the answer is unusable, because it fails closed.
+When a hit is uncited, the job asks the model to classify it as `proven` (the diff itself shows the evidence), `unverified`, `guarantee` or `liability`. The hit text goes to the model between `<claim>` tags, and the prompt says that text inside them is data. With no uncited hit, the job passes and makes no model call. In `enforce` mode the job fails on any class except `proven`. It also fails, with exit code 2 and a message, when the model call fails or the answer is unusable (a malformed entry, or a count that is not a number), because it fails closed.
 
-The input `claims_mode` sets the mode. `enforce` is the default. `report` never fails and only writes the step summary. The result goes to the step summary, not to a PR comment. The job checks out the script and lexicon from this repo at `job.workflow_sha`, the commit of the workflow file the caller pinned.
+Residual risk: the model is the only judge once uncited hits exist, and no test shows that a crafted claim cannot talk it into `proven`. The `<claim>` delimiters lower that risk and do not remove it. Another residual: a claim split across two added lines is not matched as one phrase.
+
+The input `claims_mode` sets the mode. `enforce` is the default. `report` never fails and only writes the step summary. The input `claims_url_hosts` sets the URL allowlist. The result goes to the step summary, not to a PR comment. The job checks out the script and lexicon from this repo at `job.workflow_sha`, the commit of the workflow file the caller pinned.
 
 The job is a new check, `claims check`. Add it to branch protection only after a canary run.
 
