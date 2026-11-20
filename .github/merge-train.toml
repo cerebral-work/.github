@@ -1,0 +1,8 @@
+# Central merge train (cerebral-work/vilicus, chart vilicus-merge-train).
+# PRs land with the `train` label; nobody pushes main by hand.
+enabled = true
+max_batch = 4
+auto_queue = []
+land_release_please = false
+main_guard = "active"
+ast_commute = false
