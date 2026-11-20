@@ -37,6 +37,27 @@ Changes here do not reach callers pinned to `@v1` until an operator explicitly
 updates that tag or changes caller refs. Test changes on a canary caller before
 an estate-wide rollout.
 
+## Claims check
+
+The `claims check` job flags unverified claims, guarantees and legal liabilities in public text. It reads only the lines a PR adds. It checks public-facing files: `*.md`, `*.mdx`, `*.html`, `*.astro`, `*.svelte`, `*.vue`, `*.tsx`, `*.jsx`, and anything under `site/`, `web/`, `docs/`, `public/`, `legal/`, `privacy/` or `terms/`. Code comments in other files are ignored.
+
+`scripts/claims_check.py` matches the lexicon in `scripts/claims_lexicon.json`. The categories are `guarantee`, `certification`, `absolute`, `metric` and `liability`. It prints JSON and exits 0 (no uncited hit), 1 (uncited hits) or 2 (bad input, which fails closed). Run it by hand with `git diff origin/main...HEAD | python3 scripts/claims_check.py`.
+
+**Cite a claim** with a marker on the same line or the line before:
+
+```html
+<!-- claims: proven docs/bench/2026-11.md -->
+We cut p99 latency by 40%.
+```
+
+The evidence is a URL, a repo path or a commit SHA. A marker with no evidence does not cite.
+
+When a hit is uncited, the job asks the model to classify it as `proven` (the diff itself shows the evidence), `unverified`, `guarantee` or `liability`. With no uncited hit, the job passes and makes no model call. In `enforce` mode the job fails on any class except `proven`. It also fails when the model call fails or the answer is unusable, because it fails closed.
+
+The input `claims_mode` sets the mode. `enforce` is the default. `report` never fails and only writes the step summary. The result goes to the step summary, not to a PR comment. The input `claims_ref` is the ref of this repo that supplies the script and lexicon. It defaults to `main`. Pass the same SHA you pin for the workflow.
+
+The job is a new check, `claims check`. Add it to branch protection only after a canary run.
+
 ## Pinning and releases
 
 The current release is **v1.1.2** (`df7fe2a8efe50421e1e8dfb4bcc203c4b585d386`, tag `v1.1.2`). It keeps the gateway key off curl argv, and its caller example passes `AGENT_JURY_API_KEY` by name instead of `secrets: inherit` and forwards `api_url` / `model` from repo variables (#16). **v1.1.1** (`a868a09b27976af8239cd295a6937c966f6b1f91`) writes the PR title, body and file list to `GITHUB_OUTPUT` under a random per-run delimiter, so a PR body line `EOF` can no longer inject step outputs (#13). Pin callers by full commit SHA. The previous release, **v1.1.0** (`c6567996e98d6c2228262646749821ce4f6522cd`), added the error tier for request-build and parse failures (CER-2146) and was canaried on cerebral-work/vilicus#36. Pin callers to the release commit by SHA, with the tag in a trailing comment. The moving `v1` tag still points at the older `701db71` and will be retired or moved only by an explicit operator decision.
