@@ -24,15 +24,33 @@ def git(root, *args):
                           errors='surrogateescape').stdout
 
 
-def make_diff(files, base='base\n'):
-    """files: {path: new content}. The base commit holds `base` at each path."""
-    with tempfile.TemporaryDirectory() as temp:
-        root = Path(temp)
+_KEPT = []
+
+
+def tearDownModule():
+    for tmp in _KEPT:
+        tmp.cleanup()
+
+
+def make_diff(files, base='base\n', extra=None, keep=False):
+    """files: {path: new content}. The base commit holds `base` at each path
+    and `extra` ({path: content}) unchanged. The edit is committed after the
+    diff is taken, so HEAD is the diffed head. keep=True returns
+    (diff, repo_root) and leaves the repo until the module ends."""
+    tmp = tempfile.TemporaryDirectory()
+    if keep:
+        _KEPT.append(tmp)
+    root = Path(tmp.name)
+    try:
         git(root, 'init', '-q')
         for rel in files:
             p = root / rel
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(base)
+        for rel, content in (extra or {}).items():
+            p = root / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content)
         git(root, *IDENT, 'add', '-A')
         git(root, *IDENT, 'commit', '-q', '-m', 'base')
         for rel, content in files.items():
@@ -40,7 +58,23 @@ def make_diff(files, base='base\n'):
                 (root / rel).write_bytes(content)
             else:
                 (root / rel).write_text(content)
-        return git(root, 'diff', 'HEAD', '--unified=3')
+        diff = git(root, 'diff', 'HEAD', '--unified=3')
+        git(root, *IDENT, 'commit', '-q', '-am', 'head')
+        return (diff, root) if keep else diff
+    finally:
+        if not keep:
+            tmp.cleanup()
+
+
+EVIDENCE = {'docs/x.md': 'evidence\n'}
+
+
+def run_repo(files, *extra, base='base\n', evidence=None):
+    """Run the script with --repo on a repo that holds the evidence files."""
+    diff, root = make_diff(files, base=base, extra=evidence or EVIDENCE, keep=True)
+    proc = run(diff, '--repo', str(root), *extra)
+    proc.root = root
+    return proc
 
 
 def run(diff_text, *extra, cwd=None, env=None):
@@ -67,21 +101,22 @@ class ClaimsCheck(unittest.TestCase):
         self.assertFalse(hit['cited'])
 
     def test_marker_with_evidence_passes(self):
-        text = '<!-- claims: proven docs/bench/2026-11.md -->\nWe guarantee 99.99% uptime.\n'
-        proc = run(make_diff({'site/index.md': text}))
+        text = '<!-- claims: proven docs/x.md -->\nWe guarantee it.\n'
+        proc = run_repo({'site/index.md': text})
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         out = json.loads(proc.stdout)
         self.assertEqual(out['uncited'], 0)
         self.assertTrue(out['hits'] and all(h['cited'] for h in out['hits']))
 
     def test_marker_same_line_with_url_passes(self):
-        text = 'Always on. <!-- claims: proven https://example.invalid/report -->\n'
-        proc = run(make_diff({'docs/a.md': text}))
+        text = 'Always on. <!-- claims: proven https://github.com/o/r/pull/1 -->\n'
+        proc = run_repo({'docs/a.md': text}, '--url-hosts', 'github.com')
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
 
     def test_marker_with_commit_sha_passes(self):
-        text = '<!-- claims: proven e04af8f -->\nWe guarantee it.\n'
-        proc = run(make_diff({'docs/a.md': text}))
+        diff, root = make_diff({'docs/a.md': '<!-- claims: proven %s -->\nWe guarantee it.\n'}, keep=True)
+        sha = git(root, 'rev-parse', '--short=7', 'HEAD~1').strip()
+        proc = run(diff.replace('%s', sha), '--repo', str(root))
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
 
     def test_marker_without_evidence_fails(self):
@@ -97,7 +132,7 @@ class ClaimsCheck(unittest.TestCase):
 
     def test_marker_two_lines_up_does_not_cite(self):
         text = '<!-- claims: proven docs/x.md -->\nHello.\nWe guarantee it.\n'
-        proc = run(make_diff({'site/index.md': text}))
+        proc = run_repo({'site/index.md': text})
         self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
 
     def test_code_comment_in_non_public_file_ignored(self):
@@ -301,6 +336,109 @@ class Obfuscation(unittest.TestCase):
         self.hits('A well-known, easy-to-read page.', code=0)
 
 
+class Markers(unittest.TestCase):
+    def fails(self, text, *extra, evidence=None):
+        proc = run_repo({'site/a.md': text + '\n'}, *extra, evidence=evidence)
+        self.assertEqual(proc.returncode, 1, repr(text) + proc.stdout + proc.stderr)
+        return json.loads(proc.stdout)
+
+    def passes(self, text, *extra, evidence=None):
+        proc = run_repo({'site/a.md': text + '\n'}, *extra, evidence=evidence)
+        self.assertEqual(proc.returncode, 0, repr(text) + proc.stdout + proc.stderr)
+
+    def test_unresolvable_evidence_does_not_cite(self):
+        for ev in ('x.y', 'no/such/file.md', 'http://x', '0000000', 'docs/', '../docs/x.md',
+                   'https://example.invalid/r'):
+            with self.subTest(evidence=ev):
+                self.fails('We guarantee it. <!-- claims: proven %s -->' % ev)
+
+    def test_real_path_and_real_sha_cite(self):
+        self.passes('We guarantee it. <!-- claims: proven docs/x.md -->')
+        self.passes('We guarantee it. <!-- claims: proven ./docs/x.md -->')
+        diff, root = make_diff({'site/a.md': 'We guarantee it. claims: proven SHA\n'},
+                               extra=EVIDENCE, keep=True)
+        for sha in (git(root, 'rev-parse', 'HEAD~1').strip(),
+                    git(root, 'rev-parse', '--short=7', 'HEAD~1').strip()):
+            with self.subTest(sha=sha):
+                proc = run(diff.replace('SHA', sha), '--repo', str(root))
+                self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+    def test_without_repo_nothing_resolves(self):
+        diff = make_diff({'site/a.md': 'We guarantee it. <!-- claims: proven docs/x.md -->\n'},
+                         extra=EVIDENCE)
+        self.assertEqual(run(diff).returncode, 1)
+
+    def test_marker_cites_exactly_one_hit(self):
+        out = self.fails('claims: proven docs/x.md We guarantee A, 100% uptime, SOC 2, indemnify you.')
+        self.assertTrue(all(not h['cited'] for h in out['hits']))
+        self.fails('claims: proven x.y We guarantee A, 100% uptime')
+        out = self.fails('We guarantee A, 100% uptime <!-- claims: proven docs/x.md -->')
+        cited = [h['term'] for h in out['hits'] if h['cited']]
+        self.assertEqual(len(cited), 1, out)
+        self.assertEqual(cited[0].lower(), '100%')
+        out = self.fails('<!-- claims: proven docs/x.md -->\nWe guarantee 100% uptime, SOC 2.')
+        self.assertEqual(sum(1 for h in out['hits'] if h['cited']), 1, out)
+
+    def test_marker_with_no_hit_before_it_cites_nothing_on_its_own_line(self):
+        self.fails('<!-- claims: proven docs/x.md --> We guarantee it.')
+
+    def test_next_line_single_claim_passes(self):
+        self.passes('<!-- claims: proven docs/x.md -->\nWe guarantee it.')
+
+    def test_self_cite_does_not_count(self):
+        self.fails('We guarantee claims: proven a/b')
+        self.fails('noclaims: proven docs/x.md\nWe guarantee it.')
+        self.fails('We guarantee it noclaims: proven docs/x.md')
+        self.fails('We guarantee it x-claims: proven docs/x.md')
+
+    def test_marker_token_after_comment_openers(self):
+        for text in ('// claims: proven docs/x.md\nWe guarantee it.',
+                     '# claims: proven docs/x.md\nWe guarantee it.',
+                     '{/* claims: proven docs/x.md */}\nWe guarantee it.',
+                     '<!--claims: proven docs/x.md-->\nWe guarantee it.',
+                     '  claims: proven docs/x.md\nWe guarantee it.'):
+            with self.subTest(text=text):
+                self.passes(text)
+
+
+class UrlEvidence(unittest.TestCase):
+    def cite(self, url, hosts='github.com'):
+        args = ['--url-hosts', hosts] if hosts is not None else []
+        proc = run_repo({'site/a.md': 'We guarantee it. <!-- claims: proven %s -->\n' % url}, *args)
+        return proc.returncode == 0
+
+    def test_allowed_https_host_cites(self):
+        self.assertTrue(self.cite('https://github.com/o/r/pull/1'))
+        self.assertTrue(self.cite('https://GitHub.com/x'))
+
+    def test_everything_else_does_not_cite(self):
+        for url in ('http://github.com/x', 'https://evil.example/x',
+                    'https://github.com.evil.example/x', 'https://user@github.com/x',
+                    'https://user:pw@github.com/x', 'https://127.0.0.1/x',
+                    'https://github.com:443/x', 'https://github.com:8443/x',
+                    'https://[::1]/x', 'https://xn--gthub-gua.com/x',
+                    'https://github.com./x', 'ftp://github.com/x'):
+            with self.subTest(url=url):
+                self.assertFalse(self.cite(url), url)
+
+    def test_no_allowlist_means_no_url_cites(self):
+        self.assertFalse(self.cite('https://github.com/x', hosts=None))
+        self.assertFalse(self.cite('https://github.com/x', hosts=''))
+
+    def test_ip_and_idna_host_cite_only_when_listed_exactly(self):
+        self.assertTrue(self.cite('https://127.0.0.1/x', hosts='127.0.0.1'))
+        self.assertTrue(self.cite('https://xn--gthub-gua.com/x', hosts='xn--gthub-gua.com'))
+        self.assertFalse(self.cite('https://127.0.0.2/x', hosts='127.0.0.1'))
+
+    def test_list_of_hosts(self):
+        self.assertTrue(self.cite('https://example.org/x', hosts='github.com, example.org'))
+
+    def test_url_is_never_fetched(self):
+        # A closed local port: a fetch would be refused, not accepted. The host
+        # is listed, so the URL cites without any request.
+        self.assertTrue(self.cite('https://127.0.0.1/never', hosts='127.0.0.1'))
+
+
 class ClaimsJobShell(unittest.TestCase):
     """Run the real `claims` job shell against a local fake gateway."""
 
@@ -343,6 +481,8 @@ class ClaimsJobShell(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             (root / 'site').mkdir()
+            (root / 'docs').mkdir()
+            (root / 'docs/x.md').write_text('evidence\n')
             git(root, 'init', '-q', '-b', 'main')
             (root / 'site/a.md').write_text('x\n')
             git(root, *IDENT, 'add', '-A')
@@ -354,7 +494,7 @@ class ClaimsJobShell(unittest.TestCase):
             env = {**GIT_ENV, 'LITELLM_URL': 'http://127.0.0.1:%d' % self.server.server_port,
                    'LITELLM_KEY': 'fixture', 'JURY_MODEL': 'm', 'CURL_TIMEOUT_INPUT': '30',
                    'JOB_TIMEOUT_MINUTES': '10', 'DIFF_BUDGET': '60000', 'CLAIMS_MODE': mode,
-                   'BASE_REF': 'absent', 'BASE_SHA': base, 'PR_NUMBER': '1',
+                   'CLAIMS_URL_HOSTS': 'github.com', 'BASE_REF': 'absent', 'BASE_SHA': base, 'PR_NUMBER': '1',
                    'GITHUB_STEP_SUMMARY': str(root / 'summary.md'), 'RUNNER_TEMP': temp}
             cmd = ['bash'] + ([flags] if flags else []) + ['-c', self.script]
             proc = subprocess.run(cmd, cwd=root, env=env, capture_output=True, text=True)
@@ -367,6 +507,13 @@ class ClaimsJobShell(unittest.TestCase):
     def test_cited_passes_without_model_call(self):
         text = '<!-- claims: proven docs/x.md -->\nWe guarantee it.\n'
         self.assertEqual(self.run_job(text), (0, 0))
+
+    def test_allowlisted_url_cites_and_other_url_does_not(self):
+        ok = 'We guarantee it. <!-- claims: proven https://github.com/o/r/pull/1 -->\n'
+        self.assertEqual(self.run_job(ok), (0, 0))
+        bad = 'We guarantee it. <!-- claims: proven https://evil.example/r -->\n'
+        ans = {'classifications': [{'index': 0, 'class': 'unverified'}]}
+        self.assertEqual(self.run_job(bad, answer=ans), (1, 1))
 
     def test_model_guarantee_fails(self):
         ans = {'classifications': [{'index': 0, 'class': 'guarantee'}]}
