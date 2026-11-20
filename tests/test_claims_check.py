@@ -919,11 +919,15 @@ class Round4(unittest.TestCase):
         out = self.fails('Plain a‍b word.')
         self.assertEqual({h['category'] for h in out['hits']}, {'obfuscation'})
 
-    def test_fp_french_accented_word_is_not_an_english_term(self):
-        self.passes('Il est assuré de sa réussite.')
-        self.passes('Elle est assurée.')
+    def test_accented_word_that_folds_to_a_term_is_a_hit(self):
+        # Fail closed: an English claim spelled with a precomposed accent must
+        # not pass. Accented copy that folds onto a term (French 'assur\u00e9')
+        # is a hit here; in the job the model judge classifies it.
+        self.fails('We guarant\u00e9e it.')
+        self.fails('100% s\u00e9cure.')
+        self.fails('Il est assur\u00e9 de sa r\u00e9ussite.')
         self.fails('We assure you.')
-        self.fails('We guaŕantee it.')
+        self.passes('Le r\u00e9sum\u00e9 de la soci\u00e9t\u00e9 est pr\u00eat.')
 
 
     def test_lx_round4_phrases_are_hits(self):
