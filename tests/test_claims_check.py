@@ -159,7 +159,7 @@ class ClaimsCheck(unittest.TestCase):
 
     def test_marker_same_line_with_url_passes(self):
         text = 'Always on. <!-- claims: proven https://github.com/o/r/pull/1 -->\n'
-        proc = run_repo({'docs/a.md': text}, '--url-hosts', 'github.com')
+        proc = run_repo({'docs/a.md': text}, '--url-prefixes', 'https://github.com/o/')
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
 
     def test_marker_with_commit_sha_passes(self):
@@ -559,12 +559,14 @@ class Markers(unittest.TestCase):
 
 
 class UrlEvidence(unittest.TestCase):
-    def cite(self, url, hosts='github.com'):
-        args = ['--url-hosts', hosts] if hosts is not None else []
+    P = 'https://github.com/'
+
+    def cite(self, url, prefixes=P):
+        args = ['--url-prefixes', prefixes] if prefixes is not None else []
         proc = run_repo({'site/a.md': 'We guarantee it. <!-- claims: proven %s -->\n' % url}, *args)
         return proc.returncode == 0
 
-    def test_allowed_https_host_cites(self):
+    def test_url_under_a_listed_prefix_cites(self):
         self.assertTrue(self.cite('https://github.com/o/r/pull/1'))
         self.assertTrue(self.cite('https://GitHub.com/x'))
 
@@ -578,22 +580,20 @@ class UrlEvidence(unittest.TestCase):
             with self.subTest(url=url):
                 self.assertFalse(self.cite(url), url)
 
-    def test_no_allowlist_means_no_url_cites(self):
-        self.assertFalse(self.cite('https://github.com/x', hosts=None))
-        self.assertFalse(self.cite('https://github.com/x', hosts=''))
+    def test_no_prefix_means_no_url_cites(self):
+        self.assertFalse(self.cite('https://github.com/x', prefixes=None))
+        self.assertFalse(self.cite('https://github.com/x', prefixes=''))
 
-    def test_ip_and_idna_host_cite_only_when_listed_exactly(self):
-        self.assertTrue(self.cite('https://127.0.0.1/x', hosts='127.0.0.1'))
-        self.assertTrue(self.cite('https://xn--gthub-gua.com/x', hosts='xn--gthub-gua.com'))
-        self.assertFalse(self.cite('https://127.0.0.2/x', hosts='127.0.0.1'))
+    def test_ip_literal_never_cites_even_when_listed(self):
+        self.assertFalse(self.cite('https://127.0.0.1/x', prefixes='https://127.0.0.1/'))
 
-    def test_list_of_hosts(self):
-        self.assertTrue(self.cite('https://example.org/x', hosts='github.com, example.org'))
+    def test_list_of_prefixes(self):
+        self.assertTrue(self.cite('https://example.org/x',
+                                  prefixes='https://github.com/, https://example.org/'))
 
     def test_url_is_never_fetched(self):
-        # A closed local port: a fetch would be refused, not accepted. The host
-        # is listed, so the URL cites without any request.
-        self.assertTrue(self.cite('https://127.0.0.1/never', hosts='127.0.0.1'))
+        # The host does not resolve: a fetch would fail, and the URL still cites.
+        self.assertTrue(self.cite('https://never.invalid/x', prefixes='https://never.invalid/'))
 
 
 class EvidenceRules(unittest.TestCase):
@@ -710,7 +710,7 @@ class ClaimsJobShell(unittest.TestCase):
             env = {**GIT_ENV, 'LITELLM_URL': 'http://127.0.0.1:%d' % self.server.server_port,
                    'LITELLM_KEY': 'fixture', 'JURY_MODEL': 'm', 'CURL_TIMEOUT_INPUT': '30',
                    'JOB_TIMEOUT_MINUTES': '10', 'DIFF_BUDGET': '60000', 'CLAIMS_MODE': mode,
-                   'CLAIMS_URL_HOSTS': 'github.com', 'BASE_REF': 'absent', 'BASE_SHA': base, 'PR_NUMBER': '1',
+                   'CLAIMS_URL_PREFIXES': '', 'BASE_REF': 'absent', 'BASE_SHA': base, 'PR_NUMBER': '1',
                    'GITHUB_STEP_SUMMARY': str(root / 'summary.md'), 'RUNNER_TEMP': temp,
                    **(extra_env or {})}
             cmd = ['bash'] + ([flags] if flags else []) + ['-c', self.script]
@@ -727,10 +727,14 @@ class ClaimsJobShell(unittest.TestCase):
 
     def test_allowlisted_url_cites_and_other_url_does_not(self):
         ok = 'We guarantee it. <!-- claims: proven https://github.com/o/r/pull/1 -->\n'
-        self.assertEqual(self.run_job(ok), (0, 0))
+        self.assertEqual(self.run_job(ok, extra_env={'CLAIMS_URL_PREFIXES': 'https://github.com/o/'}),
+                         (0, 0))
+        ans0 = {'classifications': [{'index': 0, 'class': 'unverified'}]}
+        self.assertEqual(self.run_job(ok, answer=ans0), (1, 1))  # default: no prefix, no cite
         bad = 'We guarantee it. <!-- claims: proven https://evil.example/r -->\n'
         ans = {'classifications': [{'index': 0, 'class': 'unverified'}]}
-        self.assertEqual(self.run_job(bad, answer=ans), (1, 1))
+        self.assertEqual(self.run_job(bad, answer=ans, extra_env={'CLAIMS_URL_PREFIXES': 'https://github.com/o/'}),
+                         (1, 1))
 
     def test_model_guarantee_fails(self):
         ans = {'classifications': [{'index': 0, 'class': 'guarantee'}]}

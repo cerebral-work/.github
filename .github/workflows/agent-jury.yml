@@ -182,15 +182,17 @@ on:
           summary. Any other value is treated as `enforce`.
         type: string
         default: enforce
-      claims_url_hosts:
+      claims_url_prefixes:
         description: >-
-          Comma-separated hosts whose https URLs may serve as `claims: proven
-          <url>` evidence in the `claims check` job. The host is compared
-          exactly and case-insensitively; userinfo, an explicit port, IP
-          literals and punycode hosts never cite unless listed exactly. The
-          job never fetches a URL. Any other URL does not cite.
+          Comma-separated URL prefixes whose https URLs may serve as `claims:
+          proven <url>` evidence in the `claims check` job, for example
+          `https://github.com/my-org/`. Each prefix must end with `/`. A URL
+          cites only when it starts with a listed prefix (scheme and host
+          compared in lowercase), is https, and has no userinfo, port,
+          IP-literal host or `..` segment. The default is empty, so no URL
+          cites. The job never fetches a URL.
         type: string
-        default: github.com
+        default: ''
       claims_paths:
         description: >-
           Comma-separated globs for the `claims check` job. When set, it
@@ -819,7 +821,7 @@ jobs:
           JOB_TIMEOUT_MINUTES: ${{ inputs.timeout_minutes }}
           DIFF_BUDGET: ${{ inputs.diff_budget }}
           CLAIMS_MODE: ${{ inputs.claims_mode }}
-          CLAIMS_URL_HOSTS: ${{ inputs.claims_url_hosts }}
+          CLAIMS_URL_PREFIXES: ${{ inputs.claims_url_prefixes }}
           CLAIMS_EVIDENCE_PATHS: ${{ inputs.claims_evidence_paths }}
           CLAIMS_PATHS: ${{ inputs.claims_paths }}
           BASE_REF: ${{ github.base_ref }}
@@ -877,7 +879,7 @@ jobs:
             --lexicon .jury-tools/scripts/claims_lexicon.json \
             --repo . --base "$EVIDENCE_BASE" --evidence-paths "${CLAIMS_EVIDENCE_PATHS:-}" \
             --scope-list "${CLAIMS_PATHS:-}" \
-            --url-hosts "${CLAIMS_URL_HOSTS:-}" > "$WORK/hits.json" 2> "$WORK/check.err" \
+            --url-prefixes "${CLAIMS_URL_PREFIXES:-}" > "$WORK/hits.json" 2> "$WORK/check.err" \
             || CHECK_EXIT=$?
           if [ "$CHECK_EXIT" -eq 0 ]; then
             echo "Result: no uncited claims in added public text. Model not called." >> "$SUMMARY"
