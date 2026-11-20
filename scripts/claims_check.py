@@ -93,7 +93,8 @@ class Evidence:
       base ref of `repo`, not a file the PR adds, changes or deletes, and, when
       `evidence_globs` is set, matching one of them;
     - sha: a commit that is an ancestor of the base ref
-      (git merge-base --is-ancestor <sha> <base>);
+      (git merge-base --is-ancestor <sha> <base>) and changes at least one
+      path that matches the evidence globs (the root commit never does);
     - url: https, no userinfo, no port, host exactly in the allowlist.
     Anything else does not cite, so the check fails closed. Without `base`
     no path or SHA resolves.
@@ -149,14 +150,25 @@ class Evidence:
         full = self._git('rev-parse', '--verify', '-q', sha + '^{commit}')
         if not full:
             return False
-        return self._git('merge-base', '--is-ancestor', full.stdout.decode().strip(),
-                         self.base) is not None
+        full = full.stdout.decode().strip()
+        if self._git('merge-base', '--is-ancestor', full, self.base) is None:
+            return False
+        # The commit must change at least one evidence path. Without --root the
+        # root commit lists nothing, and a merge commit lists nothing: both fail.
+        r = self._git('diff-tree', '--no-commit-id', '--name-only', '-r', '-z', full)
+        if not r:
+            return False
+        names = [n.decode('utf-8', 'replace') for n in r.stdout.split(b'\0') if n]
+        return any(self._glob_ok(n) for n in names)
+
+    def _glob_ok(self, path):
+        return not self.evidence_globs or any(fnmatch.fnmatchcase(path, g)
+                                              for g in self.evidence_globs)
 
     def _path_ok(self, path):
         if path in self.changed:
             return False
-        if self.evidence_globs and not any(fnmatch.fnmatchcase(path, g)
-                                           for g in self.evidence_globs):
+        if not self._glob_ok(path):
             return False
         if self.base.startswith('-'):
             return False

@@ -43,6 +43,10 @@ def make_diff(files, base='base\n', extra=None, keep=False):
     root = Path(tmp.name)
     try:
         git(root, 'init', '-q')
+        # A root commit that touches no evidence: a cited SHA must not be this one.
+        (root / '.root').write_text('root\n')
+        git(root, *IDENT, 'add', '-A')
+        git(root, *IDENT, 'commit', '-q', '-m', 'root')
         for rel in files:
             p = root / rel
             p.parent.mkdir(parents=True, exist_ok=True)
@@ -85,6 +89,9 @@ def build(base_files, head_files, base_links=None, side=None, head_links=None):
     _KEPT.append(tmp)
     root = Path(tmp.name)
     git(root, 'init', '-q', '-b', 'main')
+    (root / '.root').write_text('root\n')
+    git(root, *IDENT, 'add', '-A')
+    git(root, *IDENT, 'commit', '-q', '-m', 'root')
 
     def write(files, links):
         for rel, content in (files or {}).items():
