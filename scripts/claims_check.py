@@ -3,14 +3,14 @@
 
 usage: claims_check.py [DIFF_FILE | -] [--scope GLOB ...] [--scope-list G,G]
                        [--lexicon PATH] [--repo DIR] [--base REF]
-                       [--evidence-paths G,G] [--url-hosts HOST,HOST]
+                       [--evidence-paths G,G] [--url-prefixes PREFIX,PREFIX]
 
 Reads a unified diff (file path, or stdin when omitted or "-"). Checks only
 added lines in files that match the scope. Each line is normalised first (HTML
 entities, NFKC, format characters, look-alike letters). A marker
 `claims: proven <evidence>` cites one claim when its evidence resolves: a path
-at HEAD of --repo, a commit in --repo, or an https URL whose host is in
---url-hosts (never fetched). Without --repo or --url-hosts nothing of that
+at the base of --repo, a commit in --repo, or an https URL under one of
+--url-prefixes (never fetched). Without --repo or --url-prefixes nothing of that
 kind resolves, so the marker does not cite.
 
 stdout: {"hits": [{file,line,text,term,category,cited}], "uncited": N}
@@ -19,12 +19,13 @@ Python 3 stdlib only.
 """
 import fnmatch
 import html
+import ipaddress
 import json
 import re
 import subprocess
 import sys
 import unicodedata
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 from pathlib import Path
 
 DEFAULT_GLOBS = ['*.md', '*.mdx', '*.markdown', '*.rst', '*.html', '*.htm',
@@ -86,6 +87,35 @@ def clean_token(token):
             return token
 
 
+NUMERIC_HOST = re.compile(r'[0-9.]+|0x[0-9a-f.]+', re.IGNORECASE)
+
+
+def norm_url(url):
+    """The https URL with its scheme and host lowercased, or None when it is
+    not safe to compare: another scheme, userinfo, a port, an IP-literal or
+    numeric host, a backslash, or a `.` or `..` path segment (also percent
+    encoded). The path, query and fragment keep their case."""
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname
+        port = parts.port
+    except ValueError:
+        return None
+    if parts.scheme != 'https' or not host or port is not None or '@' in parts.netloc \
+            or '[' in parts.netloc or '\\' in url or NUMERIC_HOST.fullmatch(host):
+        return None
+    try:
+        ipaddress.ip_address(host)
+        return None
+    except ValueError:
+        pass
+    segments = unquote(parts.path).split('/')
+    if any(s in ('.', '..') for s in segments):
+        return None
+    rest = url[len('https://') + len(parts.netloc):]
+    return 'https://' + host.lower() + rest
+
+
 class Evidence:
     """Decides whether a marker's evidence resolves. Never fetches a URL.
 
@@ -95,15 +125,19 @@ class Evidence:
     - sha: a commit that is an ancestor of the base ref
       (git merge-base --is-ancestor <sha> <base>) and changes at least one
       path that matches the evidence globs (the root commit never does);
-    - url: https, no userinfo, no port, host exactly in the allowlist.
+    - url: https, no userinfo, no port, no IP-literal host, no `.` or `..`
+      path segment, and it starts with a listed prefix (scheme and host
+      lowercased). The default list is empty, so no URL cites.
     Anything else does not cite, so the check fails closed. Without `base`
     no path or SHA resolves.
     """
 
-    def __init__(self, repo=None, url_hosts=(), base=None, evidence_globs=(), changed=()):
+    def __init__(self, repo=None, url_prefixes=(), base=None, evidence_globs=(), changed=()):
         self.repo = repo
         self.base = base
-        self.url_hosts = {h.strip().lower() for h in url_hosts if h.strip()}
+        # A prefix must end with `/`; anything else is dropped, so it matches nothing.
+        self.url_prefixes = [p for p in (norm_url(x.strip()) for x in url_prefixes if x.strip())
+                             if p and p.endswith('/')]
         self.evidence_globs = [g.strip() for g in evidence_globs if g.strip()]
         self.changed = set(changed)
         self.cache = {}
@@ -187,17 +221,9 @@ class Evidence:
             and int(size) > 0
 
     def _url_ok(self, url):
-        try:
-            parts = urlsplit(url)
-            host = parts.hostname
-            port = parts.port
-        except ValueError:
-            return False
-        if parts.scheme != 'https' or not host or port is not None or '@' in parts.netloc:
-            return False
-        # IP literals and punycode or non-ASCII hosts cite only when listed
-        # exactly: the exact compare below is the whole rule.
-        return host.lower() in self.url_hosts
+        norm = norm_url(url)
+        return bool(norm) and any(norm.startswith(p) and len(norm) > len(p)
+                                  for p in self.url_prefixes)
 
 
 def marker_spans(text, evidence):
@@ -537,15 +563,15 @@ def parse_args(argv):
     src = None
     scopes = []
     repo = None
-    url_hosts = []
+    url_prefixes = []
     base = None
     evidence_globs = []
     lexicon = Path(__file__).resolve().with_name('claims_lexicon.json')
     i = 0
     while i < len(argv):
         a = argv[i]
-        if a in ('--scope', '--lexicon', '--repo', '--url-hosts', '--base',
-                 '--evidence-paths', '--scope-list', '--url-prefixes'):
+        if a in ('--scope', '--lexicon', '--repo', '--url-prefixes', '--base',
+                 '--evidence-paths', '--scope-list'):
             if i + 1 >= len(argv):
                 raise BadInput('%s needs a value' % a)
             v = argv[i + 1]
@@ -562,7 +588,7 @@ def parse_args(argv):
             elif a == '--evidence-paths':
                 evidence_globs = v.split(',')
             else:
-                url_hosts = v.split(',')
+                url_prefixes = v.split(',')
             i += 2
         elif a.startswith('--'):
             raise BadInput('unknown option %s' % a)
@@ -571,12 +597,12 @@ def parse_args(argv):
             i += 1
         else:
             raise BadInput('only one diff input allowed')
-    return src, scopes, lexicon, repo, url_hosts, base, evidence_globs
+    return src, scopes, lexicon, repo, url_prefixes, base, evidence_globs
 
 
 def main(argv):
     try:
-        src, scopes, lexicon_path, repo, url_hosts, base, evidence_globs = parse_args(argv)
+        src, scopes, lexicon_path, repo, url_prefixes, base, evidence_globs = parse_args(argv)
         try:
             if src in (None, '-'):
                 data = sys.stdin.buffer.read(MAX_INPUT_BYTES + 1)
@@ -595,7 +621,7 @@ def main(argv):
         dirs = [] if scopes else DEFAULT_DIRS
         exclude = [] if scopes else DEFAULT_EXCLUDE
         result = check(diff, lexicon, globs, dirs,
-                       Evidence(repo, url_hosts, base, evidence_globs), exclude)
+                       Evidence(repo, url_prefixes, base, evidence_globs), exclude)
     except BadInput as exc:
         sys.stderr.write('claims_check: bad input: %s\n' % exc)
         return 2
