@@ -361,6 +361,71 @@ class LexiconRound3(unittest.TestCase):
                 self.assertEqual(proc.returncode, 1, text + proc.stdout + proc.stderr)
 
 
+class Round3Evasions(unittest.TestCase):
+    def rc(self, text, **kw):
+        proc = run(make_diff({'site/a.md': text + '\n'}, **kw))
+        return proc.returncode, proc.stdout + proc.stderr
+
+    def test_markup_inside_a_word_does_not_hide_it(self):
+        for text in ('We guar<!-- -->antee it.', 'We guar<b>an</b>tee it.',
+                     'We guar**an**tee it.', 'We guar__an__tee it.', 'We guar\\antee it.',
+                     'We [guar](x)[antee](y) it.', 'We _guarantee_ it.',
+                     'We [guarantee](https://x.example/p) it.'):
+            with self.subTest(text=text):
+                rc, out = self.rc(text)
+                self.assertEqual(rc, 1, out)
+
+    def test_markup_control_clean_copy_passes(self):
+        rc, out = self.rc('<b>Plain</b> [docs](https://x.example/a) with *emphasis* and snake_case.')
+        self.assertEqual(rc, 0, out)
+
+    def test_invisible_non_cf_characters_do_not_hide_a_word(self):
+        for cp in (0x0301, 0xFE0F, 0x180B, 0x3164, 0x2800, 0x115F, 0x1160, 0xFFA0):
+            for text in ('We guar%santee it.', 'We guarantee%s it.'):
+                with self.subTest(cp=hex(cp), text=text):
+                    rc, out = self.rc(text % chr(cp))
+                    self.assertEqual(rc, 1, out)
+
+    def test_accented_copy_is_clean(self):
+        rc, out = self.rc('Le r\u00e9sum\u00e9 de la soci\u00e9t\u00e9 est pr\u00eat.')
+        self.assertEqual(rc, 0, out)
+
+    def test_whole_word_lookalikes_fold_to_latin(self):
+        for text in ('We are \u041d\u0406\u0420\u0410\u0410 ready.',
+                     'We are \u0405\u041e\u0421 2 ready.', 'We are \u0420\u0421\u0406 ready.'):
+            with self.subTest(text=text):
+                rc, out = self.rc(text)
+                self.assertEqual(rc, 1, out)
+                self.assertIn('certification', out)
+
+    def test_plain_russian_copy_is_clean(self):
+        rc, out = self.rc('\u041f\u0440\u0438\u0432\u0435\u0442, \u043c\u0438\u0440. \u042d\u0442\u043e \u0442\u0435\u043a\u0441\u0442.')
+        self.assertEqual(rc, 0, out)
+
+
+class SplitLines(unittest.TestCase):
+    def test_claim_split_over_two_added_lines_is_found_on_the_first(self):
+        for a, b in (('This service is fully', 'secure for all users.'), ('We guar-', 'antee it.')):
+            with self.subTest(a=a):
+                proc = run(make_diff({'site/a.md': a + '\n' + b + '\n'}))
+                self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+                hits = json.loads(proc.stdout)['hits']
+                self.assertEqual([h['line'] for h in hits], [1], hits)
+
+    def test_a_hit_on_one_line_is_not_reported_twice(self):
+        proc = run(make_diff({'site/a.md': 'We guarantee it.\nplain text.\n'}))
+        self.assertEqual(len(json.loads(proc.stdout)['hits']), 1, proc.stdout)
+
+    def test_lines_with_context_between_do_not_join(self):
+        proc = run(make_diff({'site/a.md': 'fully\nmiddle\nsecure\n'}, base='a\nmiddle\nc\n'))
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+    def test_a_marker_cites_a_split_claim_on_the_next_line_pair(self):
+        text = '<!-- claims: proven docs/x.md -->\nfully\nsecure\n'
+        proc = run_repo({'site/a.md': text})
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+
 class Obfuscation(unittest.TestCase):
     def hits(self, text, code=1):
         proc = run(make_diff({'site/a.md': text + '\n'}))
