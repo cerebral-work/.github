@@ -127,8 +127,8 @@ on:
           while jury jobs queued for hours). A GitHub-hosted minute is a better
           trade than a slot in a starved pool.
 
-          Override to `${{ inputs.runner }}`-style only if a repo cannot use
-          GitHub-hosted runners at all.
+          Override with a self-hosted runner label, as for the `runner` input,
+          only if a repo cannot use GitHub-hosted runners at all.
         type: string
         default: ubuntu-latest
       model:
