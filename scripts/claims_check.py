@@ -264,9 +264,9 @@ def script_of(ch):
 COMMENT = re.compile(r'<!--.*?-->', re.DOTALL)
 # A quoted attribute value may hold `>`: `<span title=">">`.
 TAG = re.compile(r'''</?[A-Za-z](?:"[^"]*"|'[^']*'|[^<>"'])*>|<![^<>]*>''')
-LINK = re.compile(r'\[([^\[\]]*)\](\([^()]*\))')
+LINK = re.compile(r'\[([^\[\]]*)\](\([^()]*\)|\[[^\[\]]*\])')
 ESCAPE = re.compile(r'\\(?=\S)')
-EMPHASIS = re.compile(r'(?<=[^\W\d_])[*_]+(?=[^\W\d_])')
+EMPHASIS = re.compile(r'(?<=[^\W\d_])[*_`]+(?=[^\W\d_])')
 WORD = re.compile(r'[^\W_]+')
 
 
