@@ -333,6 +333,17 @@ CYR_A = chr(0x0430)
 GREEK_O = chr(0x03bf)
 
 
+class LexiconRound3(unittest.TestCase):
+    def test_new_terms_hit(self):
+        for text in ('We will pay damages.', 'You will be reimbursed.', 'Audited by a firm.',
+                     'It cannot be breached.', "It can't be breached.", 'It is secure by design.',
+                     'A tamper-proof log.', 'A tamperproof log.', 'Formally verified code.',
+                     'There is no risk.', 'This is patented.'):
+            with self.subTest(text=text):
+                proc = run(make_diff({'site/a.md': text + '\n'}))
+                self.assertEqual(proc.returncode, 1, text + proc.stdout + proc.stderr)
+
+
 class Obfuscation(unittest.TestCase):
     def hits(self, text, code=1):
         proc = run(make_diff({'site/a.md': text + '\n'}))
@@ -433,6 +444,20 @@ class Markers(unittest.TestCase):
         self.fails('noclaims: proven docs/x.md\nWe guarantee it.')
         self.fails('We guarantee it noclaims: proven docs/x.md')
         self.fails('We guarantee it x-claims: proven docs/x.md')
+
+    def test_marker_on_a_non_claim_line_does_not_cite_the_next_line(self):
+        self.fails('plain text claims: proven docs/x.md\nWe guarantee it.')
+        self.fails('<!-- note --> claims: proven docs/x.md\nWe guarantee it.')
+        self.fails('see claims: proven docs/x.md -->\nWe guarantee it.')
+
+    def test_standalone_marker_forms_cite_the_next_line(self):
+        for text in ('claims: proven docs/x.md\nWe guarantee it.',
+                     '<!-- claims: proven docs/x.md -->\nWe guarantee it.',
+                     '{/* claims: proven docs/x.md */}\nWe guarantee it.',
+                     '// claims: proven docs/x.md\nWe guarantee it.',
+                     '# claims: proven docs/x.md\nWe guarantee it.'):
+            with self.subTest(text=text):
+                self.passes(text)
 
     def test_marker_token_after_comment_openers(self):
         for text in ('// claims: proven docs/x.md\nWe guarantee it.',
