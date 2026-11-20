@@ -856,5 +856,36 @@ class Round4(unittest.TestCase):
         self.assertEqual(self.cite_sha('o'), 0)
 
 
+    def cite_url(self, url, *prefixes):
+        extra = ('--url-prefixes', ','.join(prefixes)) if prefixes else ()
+        rc, _ = self.rc('We guarantee it. claims: proven %s' % url, *extra)
+        return rc
+
+    def test_nd_no_url_cites_by_default(self):
+        self.assertEqual(self.cite_url('https://github.com/x'), 1)
+        self.assertEqual(self.cite_url('https://github.com/x', ''), 1)
+
+    def test_nd_a_url_cites_only_under_a_listed_prefix(self):
+        pre = 'https://github.com/cerebral-work/'
+        self.assertEqual(self.cite_url('https://github.com/cerebral-work/repo/pull/1', pre), 0)
+        self.assertEqual(self.cite_url('https://GitHub.com/cerebral-work/repo/pull/1', pre), 0)
+        self.assertEqual(self.cite_url('https://github.com/cerebral-workx/', pre), 1)
+        self.assertEqual(self.cite_url('https://github.com/other/repo', pre), 1)
+        self.assertEqual(self.cite_url('https://github.com/cerebral-work/../evil/x', pre), 1)
+
+    def test_nd_unsafe_urls_and_prefixes_never_cite(self):
+        pre = 'https://github.com/cerebral-work/'
+        for url in ('http://github.com/cerebral-work/x', 'https://u@github.com/cerebral-work/x',
+                    'https://github.com:443/cerebral-work/x',
+                    'https://github.com./cerebral-work/x', 'ftp://github.com/cerebral-work/x'):
+            with self.subTest(url=url):
+                self.assertEqual(self.cite_url(url, pre), 1)
+        # A prefix must end with `/`; an IP literal never cites, even when listed.
+        self.assertEqual(self.cite_url('https://github.com/cerebral-work/x',
+                                       'https://github.com/cerebral-work'), 1)
+        self.assertEqual(self.cite_url('https://127.0.0.1/x', 'https://127.0.0.1/'), 1)
+        self.assertEqual(self.cite_url('https://[::1]/x', 'https://[::1]/'), 1)
+
+
 if __name__ == '__main__':
     unittest.main()
