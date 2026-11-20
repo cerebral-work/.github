@@ -899,5 +899,13 @@ class Round4(unittest.TestCase):
         self.passes('Run `make test` and see [the docs][docs].')
 
 
+    def test_ng_one_marker_does_not_cite_chained_metrics(self):
+        text = '99.99% uptime of 99.9% availability claims: proven docs/x.md'
+        out = self.fails(text)
+        self.assertGreaterEqual(out['uncited'], 1)
+        # Two separate metrics need two markers; a marker per claim still passes.
+        self.passes('99.99% uptime. claims: proven docs/x.md')
+
+
 if __name__ == '__main__':
     unittest.main()
