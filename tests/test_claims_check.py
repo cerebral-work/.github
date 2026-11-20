@@ -194,6 +194,32 @@ class Unreadable(unittest.TestCase):
         self.assertEqual(json.loads(proc.stdout), {'hits': [], 'uncited': 0})
 
 
+class Scope(unittest.TestCase):
+    def assert_in_scope(self, path):
+        proc = run(make_diff({path: 'We guarantee it.\n'}))
+        self.assertEqual(proc.returncode, 1, path + ' ' + proc.stdout + proc.stderr)
+
+    def assert_out_of_scope(self, path):
+        proc = run(make_diff({path: 'We guarantee it.\n'}))
+        self.assertEqual(proc.returncode, 0, path + ' ' + proc.stdout + proc.stderr)
+
+    def test_added_extensions_and_dirs(self):
+        for path in ('a.htm', 'a.markdown', 'a.rst', 'x/y/README', 'README.txt',
+                     'pkg/Readme.md', 'pricing/plans.txt', 'landing/a.txt'):
+            with self.subTest(path=path):
+                self.assert_in_scope(path)
+
+    def test_case_insensitive(self):
+        for path in ('A.MD', 'a/B.Html', 'Site/a.txt', 'DOCS/a.txt', 'Pricing/x.json'):
+            with self.subTest(path=path):
+                self.assert_in_scope(path)
+
+    def test_yaml_and_ts_outside_listed_dirs_stay_out(self):
+        for path in ('conf/a.yaml', 'src/a.ts', 'src/a.txt'):
+            with self.subTest(path=path):
+                self.assert_out_of_scope(path)
+
+
 class ClaimsJobShell(unittest.TestCase):
     """Run the real `claims` job shell against a local fake gateway."""
 
