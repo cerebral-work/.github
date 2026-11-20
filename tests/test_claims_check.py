@@ -177,7 +177,7 @@ class ClaimsJobShell(unittest.TestCase):
     def tearDownClass(cls):
         cls.server.shutdown()
 
-    def run_job(self, text, mode='enforce', answer=None):
+    def run_job(self, text, mode='enforce', answer=None, flags='-e'):
         self.state.update(answer=answer, calls=0)
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -195,8 +195,9 @@ class ClaimsJobShell(unittest.TestCase):
                    'JOB_TIMEOUT_MINUTES': '10', 'DIFF_BUDGET': '60000', 'CLAIMS_MODE': mode,
                    'BASE_REF': 'absent', 'BASE_SHA': base, 'PR_NUMBER': '1',
                    'GITHUB_STEP_SUMMARY': str(root / 'summary.md'), 'RUNNER_TEMP': temp}
-            proc = subprocess.run(['bash', '-c', self.script], cwd=root, env=env,
-                                  capture_output=True, text=True)
+            cmd = ['bash'] + ([flags] if flags else []) + ['-c', self.script]
+            proc = subprocess.run(cmd, cwd=root, env=env, capture_output=True, text=True)
+        self.last_out = proc.stdout + proc.stderr
         return proc.returncode, self.state['calls']
 
     def test_clean_passes_without_model_call(self):
@@ -219,6 +220,16 @@ class ClaimsJobShell(unittest.TestCase):
 
     def test_missing_classification_fails_closed(self):
         self.assertEqual(self.run_job('We guarantee it.\n', answer={'classifications': []}), (1, 1))
+
+    def test_malformed_answer_fails_with_message_under_and_without_errexit(self):
+        # The runner uses `bash -e {0}`; the job must fail closed with its own
+        # message in both shells.
+        for flags in ('-e', ''):
+            with self.subTest(flags=flags):
+                ans = {'classifications': ['proven']}
+                rc, calls = self.run_job('We guarantee it.\n', answer=ans, flags=flags)
+                self.assertEqual((rc, calls), (2, 1), self.last_out)
+                self.assertIn('claims check:', self.last_out)
 
     def test_report_mode_never_fails(self):
         self.assertEqual(self.run_job('We guarantee it.\n', mode='report'), (0, 1))
