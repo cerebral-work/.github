@@ -220,6 +220,36 @@ class Scope(unittest.TestCase):
                 self.assert_out_of_scope(path)
 
 
+class Lexicon(unittest.TestCase):
+    CASES = [
+        ('This is zero risk.', 'absolute'),
+        ('It is risk-free.', 'absolute'),
+        ('The service will not fail.', 'absolute'),
+        ("The service won't fail.", 'absolute'),
+        ('We reach five nines.', 'metric'),
+        ('We reach 5 nines.', 'metric'),
+        ('Served 99.99% of requests.', 'metric'),
+        ('Up 99.9% of the time.', 'metric'),
+        ('A money-back offer.', 'liability'),
+        ('We hold harmless our users.', 'liability'),
+        ('We hold you harmless.', 'liability'),
+        ('We are HITRUST ready.', 'certification'),
+        ('Uses military-grade encryption.', 'absolute'),
+        ('Uses bank-grade encryption.', 'absolute'),
+    ]
+
+    def test_each_term_hits_in_its_category(self):
+        for text, cat in self.CASES:
+            with self.subTest(text=text):
+                proc = run(make_diff({'site/a.md': text + '\n'}))
+                self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+                self.assertIn(cat, {h['category'] for h in json.loads(proc.stdout)['hits']})
+
+    def test_plain_decimal_text_without_percent_is_clean(self):
+        proc = run(make_diff({'site/a.md': 'Version 1.5 ships on the 3rd.\n'}))
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+
 class ClaimsJobShell(unittest.TestCase):
     """Run the real `claims` job shell against a local fake gateway."""
 
