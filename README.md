@@ -95,6 +95,51 @@ The input `claims_mode` sets the mode. `enforce` is the default. `report` never 
 
 The job is a new check, `claims check`. Add it to branch protection only after a canary run.
 
+## Deploy gate
+
+`deploy-gate.yml` runs the claims check on everything a deploy ships. The range starts at the newest successful deployment of the caller's environment and ends at the commit being deployed. GitHub records a deployment for every job that uses an environment, so the gate keeps no state of its own. The check always enforces; the gate has no `claims_mode` input.
+
+The approval is the environment on the caller's deploy job (TASK-0823, option A). The reviewer approves the job that holds the deploy credentials, after the gate has run in the same workflow run. The gate's step summary shows the environment, the last deployed commit, the commit being deployed, the number of commits in the range and the effective claims settings.
+
+```yaml
+jobs:
+  gate:
+    uses: cerebral-work/.github/.github/workflows/deploy-gate.yml@<sha> # <tag>
+    permissions:
+      contents: read
+      deployments: read
+    with:
+      environment: reverie-docs-prod
+    secrets:
+      AGENT_JURY_API_KEY: ${{ secrets.AGENT_JURY_API_KEY }}
+  deploy:
+    needs: gate
+    environment: reverie-docs-prod
+    steps:
+      - uses: actions/checkout@<sha> # v7
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+```
+
+Set up the environment `<unit>-prod` like `cortex-prod`:
+- required reviewer `todie`;
+- deployment branches limited to protected branches;
+- the deploy credentials stored as environment secrets, not repo secrets.
+
+A first deploy has no deployment to start from. Pass `base_sha` once, as a full 40-character SHA, for example the last commit that is already live. The gate fails closed in each of these cases:
+- no successful deployment is found and no `base_sha` is given;
+- the deployments API refuses the request, for example when the caller did not grant `deployments: read`;
+- the base commit is not in the repository's history;
+- the environment name has characters other than letters, digits, `.`, `_` and `-`.
+
+Evidence follows the PR rule with the last deployed commit as the base. It must exist at that commit and stay unchanged in the range.
+
+Limits:
+- A caller can drop `needs: gate` only by landing a workflow change on `main`. The approval still applies, because it belongs to the environment, but the claims check would not run. A reviewer should see the `gate / claims check` job in the run before approving.
+- GitHub lets a required reviewer's token approve through the API, and agents on ceres hold that token. The approval stops accidents, not a rogue agent. It moves to a reflex RED card once reflexd is reachable from CI runners (TASK-0823).
+- Every successful deployment of the environment moves the base, whichever workflow made it.
+- The range is `git diff base...sha`. A rollback to an older commit has an empty range and passes.
+
 ## Pinning and releases
 
 The current release is **v1.2.0** (`f72b4b6c4d469929fafa7bda3b1a5374b5531abb`, tag `v1.2.0`). It adds the `claims check` job (see Claims check above; `claims_mode` defaults to `enforce`, so set `report` while you tune a repo) and fixes a startup failure on `main` caused by an expression in the `verdict_runner` input description (#19, #21). **v1.1.2** (`df7fe2a8efe50421e1e8dfb4bcc203c4b585d386`) keeps the gateway key off curl argv, and its caller example passes `AGENT_JURY_API_KEY` by name instead of `secrets: inherit` and forwards `api_url` / `model` from repo variables (#16). **v1.1.1** (`a868a09b27976af8239cd295a6937c966f6b1f91`) writes the PR title, body and file list to `GITHUB_OUTPUT` under a random per-run delimiter, so a PR body line `EOF` can no longer inject step outputs (#13). Pin callers by full commit SHA. The previous release, **v1.1.0** (`c6567996e98d6c2228262646749821ce4f6522cd`), added the error tier for request-build and parse failures (CER-2146) and was canaried on cerebral-work/vilicus#36. Pin callers to the release commit by SHA, with the tag in a trailing comment. The moving `v1` tag still points at the older `701db71` and will be retired or moved only by an explicit operator decision.
