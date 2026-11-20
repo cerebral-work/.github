@@ -926,5 +926,33 @@ class Round4(unittest.TestCase):
         self.fails('We guaŕantee it.')
 
 
+    def test_lx_round4_phrases_are_hits(self):
+        cases = (('It is the fastest ever.', 'absolute'),
+                 ('The best tool ever? It is the smallest ever.', 'absolute'),
+                 ('An uncrackable vault.', 'absolute'),
+                 ('We never lose data.', 'absolute'),
+                 ('Lossless storage.', 'absolute'),
+                 ('Provably secure design.', 'absolute'),
+                 ('Files are end-to-end encrypted.', 'certification'),
+                 ('Files are end to end encrypted.', 'certification'),
+                 ('Safe and secure.', 'absolute'),
+                 ('A best-in-class API.', 'absolute'),
+                 ('The industry-leading API.', 'absolute'),
+                 ('Trusted by Fortune 500 firms.', 'certification'),
+                 ('Trusted by 10,000 teams.', 'certification'))
+        for text, cat in cases:
+            with self.subTest(text=text):
+                out = self.fails(text)
+                self.assertIn(cat, {h['category'] for h in out['hits']})
+
+    def test_lx_round4_plain_copy_stays_clean(self):
+        for text in ('The test ever-green notes. Data is encrypted at rest.',
+                     'Trusted by teams who ship. We keep a copy of your data.',
+                     'It is safe to run. A secure login page. The best option.',
+                     'The first release ever shipped on Friday.'):
+            with self.subTest(text=text):
+                self.passes(text)
+
+
 if __name__ == '__main__':
     unittest.main()
