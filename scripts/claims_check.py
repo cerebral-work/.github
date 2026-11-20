@@ -545,7 +545,7 @@ def parse_args(argv):
     while i < len(argv):
         a = argv[i]
         if a in ('--scope', '--lexicon', '--repo', '--url-hosts', '--base',
-                 '--evidence-paths', '--scope-list'):
+                 '--evidence-paths', '--scope-list', '--url-prefixes'):
             if i + 1 >= len(argv):
                 raise BadInput('%s needs a value' % a)
             v = argv[i + 1]
