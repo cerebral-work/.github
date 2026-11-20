@@ -891,5 +891,13 @@ class Round4(unittest.TestCase):
         self.assertEqual(self.cite_url('https://[::1]/x', 'https://[::1]/'), 1)
 
 
+    def test_nf_reference_links_and_code_spans_do_not_split_a_word(self):
+        for text in ('We [guar][a][antee][b] it.', 'We guar`an`tee it.',
+                     'We [guar][a]antee it.'):
+            with self.subTest(text=text):
+                self.fails(text)
+        self.passes('Run `make test` and see [the docs][docs].')
+
+
 if __name__ == '__main__':
     unittest.main()
