@@ -224,7 +224,8 @@ def script_of(ch):
 
 
 COMMENT = re.compile(r'<!--.*?-->', re.DOTALL)
-TAG = re.compile(r'</?[A-Za-z][^<>]*>|<![^<>]*>')
+# A quoted attribute value may hold `>`: `<span title=">">`.
+TAG = re.compile(r'''</?[A-Za-z](?:"[^"]*"|'[^']*'|[^<>"'])*>|<![^<>]*>''')
 LINK = re.compile(r'\[([^\[\]]*)\](\([^()]*\))')
 ESCAPE = re.compile(r'\\(?=\S)')
 EMPHASIS = re.compile(r'(?<=[^\W\d_])[*_]+(?=[^\W\d_])')
@@ -288,14 +289,17 @@ def fold(text, terms):
 
 
 def normalise(text):
-    """Return (s2, scan, idx, obfuscation_terms) for one added line.
+    """Return (s2, views, obfuscation_terms) for one added line.
 
-    s2: the line after `pre`; markers are found in it. scan: s2 with markup
-    stripped, look-alikes folded and whitespace kept (same length as idx).
-    idx[i] is the s2 position of scan[i]."""
+    s2: the line after `pre`; markers are found in it. views: two (scan, idx)
+    pairs, matched together and deduplicated. The first is s2 with markup
+    stripped, so fragments join; the second is s2 as it stands, so text inside
+    a tag (an attribute value) is still seen. Both fold look-alikes to Latin
+    and keep whitespace. idx[i] is the s2 position of scan[i]."""
     s2, terms = pre(text)
     stripped, idx = strip_markup(s2)
-    return s2, fold(stripped, terms), idx, terms
+    views = [(fold(stripped, terms), idx), (fold(s2, terms), list(range(len(s2))))]
+    return s2, views, list(dict.fromkeys(terms))
 
 
 def in_scope(path, globs, dirs, exclude=()):
@@ -442,30 +446,40 @@ def check(diff, lexicon, globs, dirs, evidence, exclude=()):
         if '\x00' in text or '�' in text:
             hits.append(make_hit(path, line_no, 'undecodable text', 'undecodable', 'unreadable'))
             continue
-        s2, scan, idx, odd = normalise(text)
+        s2, views, odd = normalise(text)
         spans = marker_spans(s2, evidence)
         rows.append({'path': path, 'no': line_no, 'hunk': hunk, 'shown': shown, 's2': s2,
-                     'scan': blank_scan(scan, idx, spans), 'idx': idx, 'spans': spans,
-                     'odd': odd})
+                     'views': [(blank_scan(scan, idx, spans), idx) for scan, idx in views],
+                     'spans': spans, 'odd': odd})
     lines = {}
     for n, row in enumerate(rows):
-        path, line_no, shown, idx = row['path'], row['no'], row['shown'], row['idx']
+        path, line_no, shown = row['path'], row['no'], row['shown']
         found = []
+        seen = set()
+
+        def add(a, b, term, cat):
+            key = (a, b, cat, term.lower())
+            if key not in seen:
+                seen.add(key)
+                found.append((a, b, make_hit(path, line_no, shown, term, cat)))
+
         # Obfuscation is a property of the whole line: it sorts before any marker.
         for term in row['odd']:
-            found.append((-1, -1, make_hit(path, line_no, shown, term, 'obfuscation')))
-        for term, cat, rx in lexicon:
-            for m in rx.finditer(row['scan']):
-                found.append((idx[m.start()], idx[m.end() - 1] + 1,
-                              make_hit(path, line_no, shown, m.group(0), cat)))
+            add(-1, -1, term, 'obfuscation')
+        for scan, idx in row['views']:
+            for term, cat, rx in lexicon:
+                for m in rx.finditer(scan):
+                    add(idx[m.start()], idx[m.end() - 1] + 1, m.group(0), cat)
         # A claim split over two consecutive added lines of one hunk: match the
         # pair joined with a space (no space after a trailing hyphen) and keep
         # only the hits that cross the join. Whole-line hits are already found.
         nxt = rows[n + 1] if n + 1 < len(rows) else None
         if nxt and nxt['path'] == path and nxt['hunk'] == row['hunk'] and nxt['no'] == line_no + 1:
-            a_text = row['scan'].rstrip()
-            b_text = nxt['scan'].lstrip()
-            if a_text and b_text:
+            for (scan, idx), (nscan, _) in zip(row['views'], nxt['views']):
+                a_text = scan.rstrip()
+                b_text = nscan.lstrip()
+                if not (a_text and b_text):
+                    continue
                 if a_text.endswith('-'):
                     joined, cut = a_text[:-1] + b_text, len(a_text) - 1
                 else:
@@ -473,8 +487,7 @@ def check(diff, lexicon, globs, dirs, evidence, exclude=()):
                 for term, cat, rx in lexicon:
                     for m in rx.finditer(joined):
                         if m.start() < cut < m.end():
-                            found.append((idx[m.start()], idx[min(cut, len(idx)) - 1] + 1,
-                                          make_hit(path, line_no, shown, m.group(0), cat)))
+                            add(idx[m.start()], idx[min(cut, len(idx)) - 1] + 1, m.group(0), cat)
         found.sort(key=lambda f: (f[0], f[1]))
         clusters = []
         end = None
