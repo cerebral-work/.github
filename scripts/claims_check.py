@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Claims check: flag unverified claims in ADDED public-facing lines of a diff.
 
-usage: claims_check.py [DIFF_FILE | -] [--scope GLOB ...] [--lexicon PATH]
-                       [--repo DIR] [--url-hosts HOST,HOST]
+usage: claims_check.py [DIFF_FILE | -] [--scope GLOB ...] [--scope-list G,G]
+                       [--lexicon PATH] [--repo DIR] [--base REF]
+                       [--evidence-paths G,G] [--url-hosts HOST,HOST]
 
 Reads a unified diff (file path, or stdin when omitted or "-"). Checks only
 added lines in files that match the scope. Each line is normalised first (HTML
@@ -27,9 +28,13 @@ from urllib.parse import urlsplit
 from pathlib import Path
 
 DEFAULT_GLOBS = ['*.md', '*.mdx', '*.markdown', '*.rst', '*.html', '*.htm',
-                 '*.astro', '*.svelte', '*.vue', '*.tsx', '*.jsx', 'README*']
+                 '*.astro', '*.svelte', '*.vue', '*.tsx', '*.jsx', '*.njk', '*.liquid', 'README*']
+# Any file under these directories at any depth (so `*.txt` and `*.json`
+# there are in scope), plus the locale directories.
 DEFAULT_DIRS = ['site', 'web', 'docs', 'public', 'legal', 'privacy', 'terms',
-                'pricing', 'landing']
+                'pricing', 'landing', 'locales', 'i18n']
+# Never in the default scope: licence text is warranty boilerplate.
+DEFAULT_EXCLUDE = ['license*', 'licence*', 'copying*', 'unlicense*']
 MAX_INPUT_BYTES = 32 * 1024 * 1024
 MAX_LINE_CHARS = 2000
 # Whitespace or hyphens between the words of a term: "fully-secure",
@@ -236,14 +241,16 @@ def normalise(text):
     return re.sub(r'\s+', ' ', t), terms
 
 
-def in_scope(path, globs, dirs):
+def in_scope(path, globs, dirs, exclude=()):
     """Case-insensitive match of the file name or path against globs, or of a
-    parent directory name against dirs."""
+    parent directory name against dirs. `exclude` globs on the file name win."""
     path = path.lower()
     parts = path.split('/')
     name = parts[-1]
+    if any(fnmatch.fnmatchcase(name, g.lower()) for g in exclude):
+        return False
     if any(fnmatch.fnmatchcase(name, g.lower()) or fnmatch.fnmatchcase(path, g.lower())
-           for g in globs):
+           or fnmatch.fnmatchcase('/' + path, g.lower()) for g in globs):
         return True
     return any(d.lower() in parts[:-1] for d in dirs)
 
@@ -348,7 +355,7 @@ def blank_spans(text, spans):
     return text
 
 
-def check(diff, lexicon, globs, dirs, evidence):
+def check(diff, lexicon, globs, dirs, evidence, exclude=()):
     hits = []
     lines = {}
     events = list(parse_added(diff))
@@ -358,12 +365,12 @@ def check(diff, lexicon, globs, dirs, evidence):
             continue
         if ev[0] == 'unreadable':
             _, path, reason = ev
-            if in_scope(path, globs, dirs):
+            if in_scope(path, globs, dirs, exclude):
                 hits.append({'file': path, 'line': 0, 'text': reason,
                              'term': reason, 'category': 'unreadable', 'cited': False})
             continue
         _, path, line_no, text = ev
-        if not in_scope(path, globs, dirs):
+        if not in_scope(path, globs, dirs, exclude):
             continue
         if '\x00' in text or '\ufffd' in text:
             hits.append({'file': path, 'line': line_no, 'text': 'undecodable text',
@@ -427,7 +434,7 @@ def parse_args(argv):
     while i < len(argv):
         a = argv[i]
         if a in ('--scope', '--lexicon', '--repo', '--url-hosts', '--base',
-                 '--evidence-paths'):
+                 '--evidence-paths', '--scope-list'):
             if i + 1 >= len(argv):
                 raise BadInput('%s needs a value' % a)
             v = argv[i + 1]
@@ -437,6 +444,8 @@ def parse_args(argv):
                 lexicon = v
             elif a == '--repo':
                 repo = v
+            elif a == '--scope-list':
+                scopes.extend(g.strip() for g in v.split(',') if g.strip())
             elif a == '--base':
                 base = v
             elif a == '--evidence-paths':
@@ -473,7 +482,9 @@ def main(argv):
         lexicon = load_lexicon(lexicon_path)
         globs = scopes if scopes else DEFAULT_GLOBS
         dirs = [] if scopes else DEFAULT_DIRS
-        result = check(diff, lexicon, globs, dirs, Evidence(repo, url_hosts, base, evidence_globs))
+        exclude = [] if scopes else DEFAULT_EXCLUDE
+        result = check(diff, lexicon, globs, dirs,
+                       Evidence(repo, url_hosts, base, evidence_globs), exclude)
     except BadInput as exc:
         sys.stderr.write('claims_check: bad input: %s\n' % exc)
         return 2

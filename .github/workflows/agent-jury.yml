@@ -191,6 +191,15 @@ on:
           job never fetches a URL. Any other URL does not cite.
         type: string
         default: github.com
+      claims_paths:
+        description: >-
+          Comma-separated globs for the `claims check` job. When set, it
+          REPLACES the default scope (markup and template files, README*, and
+          the public directories). Use it for a repo whose public copy lives
+          elsewhere, for example `src/content/**/*.yaml`. Empty (the default)
+          keeps the default scope.
+        type: string
+        default: ''
       claims_evidence_paths:
         description: >-
           Comma-separated globs. When set, a path cited as `claims: proven
@@ -811,6 +820,7 @@ jobs:
           CLAIMS_MODE: ${{ inputs.claims_mode }}
           CLAIMS_URL_HOSTS: ${{ inputs.claims_url_hosts }}
           CLAIMS_EVIDENCE_PATHS: ${{ inputs.claims_evidence_paths }}
+          CLAIMS_PATHS: ${{ inputs.claims_paths }}
           BASE_REF: ${{ github.base_ref }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -839,9 +849,10 @@ jobs:
           echo "" >> "$SUMMARY"
           echo "Mode: \`$MODE\`" >> "$SUMMARY"
 
-          # Same diff the review job reads.
-          if ! git diff "origin/${BASE_REF}...HEAD" --unified=3 > "$WORK/pr.diff" 2>/dev/null; then
-            if ! git diff "${BASE_SHA}...HEAD" --unified=3 > "$WORK/pr.diff"; then
+          # Same diff the review job reads, but with rename detection off: a
+          # file moved into a public path must show all its lines as added.
+          if ! git diff --no-renames "origin/${BASE_REF}...HEAD" --unified=3 > "$WORK/pr.diff" 2>/dev/null; then
+            if ! git diff --no-renames "${BASE_SHA}...HEAD" --unified=3 > "$WORK/pr.diff"; then
               echo "Result: could not read the PR diff." >> "$SUMMARY"
               finish 1 "::error::claims check: could not read the PR diff"
             fi
@@ -864,6 +875,7 @@ jobs:
           python3 .jury-tools/scripts/claims_check.py "$WORK/pr.diff" \
             --lexicon .jury-tools/scripts/claims_lexicon.json \
             --repo . --base "$EVIDENCE_BASE" --evidence-paths "${CLAIMS_EVIDENCE_PATHS:-}" \
+            --scope-list "${CLAIMS_PATHS:-}" \
             --url-hosts "${CLAIMS_URL_HOSTS:-}" > "$WORK/hits.json" 2> "$WORK/check.err" \
             || CHECK_EXIT=$?
           if [ "$CHECK_EXIT" -eq 0 ]; then
@@ -948,6 +960,14 @@ jobs:
           if ! jq -e '.classifications | type == "array"' "$WORK/content.txt" > /dev/null 2>&1; then
             echo "Result: ${UNCITED} uncited hit(s); the model answer was not usable. Failing closed." >> "$SUMMARY"
             finish 1 "::error::claims check: unusable model answer with ${UNCITED} uncited hit(s)"
+          fi
+
+          # One entry per index. A repeated index would let the first answer
+          # win, so it fails closed.
+          if ! jq -e '[.classifications[] | select(type == "object") | .index | select(. != null)] | (length == (unique | length))' \
+            "$WORK/content.txt" > /dev/null 2>&1; then
+            echo "Result: ${UNCITED} uncited hit(s); the model answer repeats an index. Failing closed." >> "$SUMMARY"
+            finish 2 "::error::claims check: duplicate index in the model answer with ${UNCITED} uncited hit(s), failing closed"
           fi
 
           # Per hit: the class is whitelisted; a missing or unknown class counts
