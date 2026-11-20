@@ -373,9 +373,10 @@ class Markers(unittest.TestCase):
         self.assertTrue(all(not h['cited'] for h in out['hits']))
         self.fails('claims: proven x.y We guarantee A, 100% uptime')
         out = self.fails('We guarantee A, 100% uptime <!-- claims: proven docs/x.md -->')
-        cited = [h['term'] for h in out['hits'] if h['cited']]
-        self.assertEqual(len(cited), 1, out)
-        self.assertEqual(cited[0].lower(), '100%')
+        # One claim: the overlapping hits `100%` and `100% uptime`. The
+        # guarantee on the same line stays uncited.
+        cited = {h['term'].lower() for h in out['hits'] if h['cited']}
+        self.assertEqual(cited, {'100%', '100% uptime'}, out)
         out = self.fails('<!-- claims: proven docs/x.md -->\nWe guarantee 100% uptime, SOC 2.')
         self.assertEqual(sum(1 for h in out['hits'] if h['cited']), 1, out)
 

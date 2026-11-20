@@ -2,6 +2,7 @@
 """Claims check: flag unverified claims in ADDED public-facing lines of a diff.
 
 usage: claims_check.py [DIFF_FILE | -] [--scope GLOB ...] [--lexicon PATH]
+                       [--repo DIR] [--url-hosts HOST,HOST]
 
 Reads a unified diff (file path, or stdin when omitted or "-"). Checks only
 added lines in files that match the scope. A hit is cited when the same line
@@ -16,8 +17,10 @@ import fnmatch
 import html
 import json
 import re
+import subprocess
 import sys
 import unicodedata
+from urllib.parse import urlsplit
 from pathlib import Path
 
 DEFAULT_GLOBS = ['*.md', '*.mdx', '*.markdown', '*.rst', '*.html', '*.htm',
@@ -38,28 +41,97 @@ CONFUSABLE = {
 }
 
 HUNK = re.compile(r'^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@')
-MARKER = re.compile(r'claims:\s*proven\b[ \t]*(\S*)', re.IGNORECASE)
+# The marker token starts the line, or follows whitespace or a comment opener
+# (`<!--`, `//`, `#`, `{/*`). So `noclaims: proven x` is not a marker.
+MARKER = re.compile(r'(?:^|(?<=\s)|(?<=<!--)|(?<=//)|(?<=#)|(?<=\{/\*))'
+                    r'claims:\s*proven\b[ \t]*(\S*)', re.IGNORECASE)
 URL = re.compile(r'^https?://[^\s<>"\']+$', re.IGNORECASE)
 SHA = re.compile(r'^[0-9a-f]{7,40}$', re.IGNORECASE)
 PATH = re.compile(r'^(?:\.{0,2}/)?[\w.@+-]+(?:/[\w.@+-]+)+/?$|^[\w@+-]+\.[A-Za-z0-9]{1,8}$')
+GIT_TIMEOUT_SECS = 10
 
 
 class BadInput(Exception):
     pass
 
 
-def evidence_ok(token):
-    token = token.rstrip('.,;)>')
-    for tail in ('-->', '*/', '}}', '%}'):
-        if token.endswith(tail):
-            token = token[:-len(tail)]
-    if not token:
+def clean_token(token):
+    """Strip a closing comment token and trailing punctuation from evidence."""
+    while True:
+        before = token
+        for tail in ('-->', '*/', '}}', '%}'):
+            if token.endswith(tail):
+                token = token[:-len(tail)]
+        token = token.rstrip('.,;)>')
+        if token == before:
+            return token
+
+
+class Evidence:
+    """Decides whether a marker's evidence resolves. Never fetches a URL.
+
+    - path: exists at HEAD of `repo` (git cat-file -e HEAD:<path>);
+    - sha: names a commit in `repo`;
+    - url: https, no userinfo, no port, host exactly in the allowlist.
+    Anything else does not cite, so the check fails closed.
+    """
+
+    def __init__(self, repo=None, url_hosts=()):
+        self.repo = repo
+        self.url_hosts = {h.strip().lower() for h in url_hosts if h.strip()}
+        self.cache = {}
+
+    def resolves(self, token):
+        token = clean_token(token)
+        if not token:
+            return False
+        if token not in self.cache:
+            self.cache[token] = self._resolve(token)
+        return self.cache[token]
+
+    def _git_ok(self, *args):
+        if not self.repo:
+            return False
+        try:
+            r = subprocess.run(['git', '-C', self.repo, 'cat-file', '-e', *args],
+                               capture_output=True, timeout=GIT_TIMEOUT_SECS)
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return r.returncode == 0
+
+    def _resolve(self, token):
+        if URL.match(token):
+            return self._url_ok(token)
+        if SHA.match(token):
+            return self._git_ok(token + '^{commit}')
+        if PATH.match(token):
+            path = token
+            while path.startswith('./'):
+                path = path[2:]
+            path = path.rstrip('/')
+            if not path or path.startswith('/') or '..' in path.split('/'):
+                return False
+            return self._git_ok('HEAD:' + path)
         return False
-    return bool(URL.match(token) or SHA.match(token) or PATH.match(token))
+
+    def _url_ok(self, url):
+        try:
+            parts = urlsplit(url)
+            host = parts.hostname
+            port = parts.port
+        except ValueError:
+            return False
+        if parts.scheme != 'https' or not host or port is not None or '@' in parts.netloc:
+            return False
+        # IP literals and punycode or non-ASCII hosts cite only when listed
+        # exactly: the exact compare below is the whole rule.
+        return host.lower() in self.url_hosts
 
 
-def has_marker(text):
-    return any(evidence_ok(m.group(1)) for m in MARKER.finditer(text))
+def marker_spans(text, evidence):
+    """[(start, end, resolves)] for each marker in text."""
+    return [(m.start(), m.end(), evidence.resolves(m.group(1)))
+            for m in MARKER.finditer(text)]
 
 
 def load_lexicon(path):
@@ -202,9 +274,15 @@ def parse_added(diff):
         raise BadInput('not a unified diff (no file headers and hunks)')
 
 
-def check(diff, lexicon, globs, dirs):
+def blank_spans(text, spans):
+    for a, b, _ in spans:
+        text = text[:a] + ' ' * (b - a) + text[b:]
+    return text
+
+
+def check(diff, lexicon, globs, dirs, evidence):
     hits = []
-    prev_key = prev_text = None
+    lines = {}
     for ev in parse_added(diff):
         if ev[0] == 'unreadable':
             _, path, reason = ev
@@ -213,42 +291,79 @@ def check(diff, lexicon, globs, dirs):
                              'term': reason, 'category': 'unreadable', 'cited': False})
             continue
         _, path, line_no, text = ev
-        prev = prev_text if prev_key == (path, line_no - 1) else None
-        prev_key, prev_text = (path, line_no), text
         if not in_scope(path, globs, dirs):
             continue
         if '\x00' in text or '\ufffd' in text:
             hits.append({'file': path, 'line': line_no, 'text': 'undecodable text',
                          'term': 'undecodable', 'category': 'unreadable', 'cited': False})
             continue
-        cited = has_marker(text) or (prev is not None and has_marker(prev))
         norm, odd = normalise(text)
         shown = text.strip()[:MAX_LINE_CHARS]
+        spans = marker_spans(norm, evidence)
+        found = []
+        # Obfuscation is a property of the whole line: it sorts before any marker.
         for term in odd:
-            hits.append({'file': path, 'line': line_no, 'text': shown,
-                         'term': term, 'category': 'obfuscation', 'cited': cited})
-        scan = MARKER.sub(' ', norm)
+            found.append((-1, -1, {'file': path, 'line': line_no, 'text': shown,
+                               'term': term, 'category': 'obfuscation', 'cited': False}))
+        scan = blank_spans(norm, spans)
         for term, cat, rx in lexicon:
             for m in rx.finditer(scan):
-                hits.append({'file': path, 'line': line_no, 'text': shown,
-                             'term': m.group(0), 'category': cat, 'cited': cited})
+                found.append((m.start(), m.end(), {'file': path, 'line': line_no, 'text': shown,
+                                          'term': m.group(0), 'category': cat, 'cited': False}))
+        found.sort(key=lambda f: (f[0], f[1]))
+        clusters = []
+        end = None
+        for a, b, h in found:
+            if clusters and end is not None and a < end:
+                clusters[-1][0].append(h)
+                end = max(end, b)
+            else:
+                clusters.append(([h], a))
+                end = b
+        lines[(path, line_no)] = (clusters, spans)
+        hits.extend(h for _, _, h in found)
+    # A marker cites exactly one claim: one cluster of overlapping hits (for
+    # example `99.99%` and `99.99% uptime` are the same words). With no hit on
+    # its own line it cites the first claim on the next added line; otherwise
+    # the nearest claim before it on its own line.
+    for (path, line_no), (clusters, spans) in lines.items():
+        for start, _, ok in spans:
+            if not ok:
+                continue
+            if clusters:
+                before = [c for c, pos in clusters if pos < start]
+                if before:
+                    for h in before[-1]:
+                        h['cited'] = True
+            else:
+                nxt = lines.get((path, line_no + 1))
+                if nxt and nxt[0]:
+                    for h in nxt[0][0][0]:
+                        h['cited'] = True
     return {'hits': hits, 'uncited': sum(1 for h in hits if not h['cited'])}
 
 
 def parse_args(argv):
     src = None
     scopes = []
+    repo = None
+    url_hosts = []
     lexicon = Path(__file__).resolve().with_name('claims_lexicon.json')
     i = 0
     while i < len(argv):
         a = argv[i]
-        if a in ('--scope', '--lexicon'):
+        if a in ('--scope', '--lexicon', '--repo', '--url-hosts'):
             if i + 1 >= len(argv):
                 raise BadInput('%s needs a value' % a)
+            v = argv[i + 1]
             if a == '--scope':
-                scopes.append(argv[i + 1])
+                scopes.append(v)
+            elif a == '--lexicon':
+                lexicon = v
+            elif a == '--repo':
+                repo = v
             else:
-                lexicon = argv[i + 1]
+                url_hosts = v.split(',')
             i += 2
         elif a.startswith('--'):
             raise BadInput('unknown option %s' % a)
@@ -257,12 +372,12 @@ def parse_args(argv):
             i += 1
         else:
             raise BadInput('only one diff input allowed')
-    return src, scopes, lexicon
+    return src, scopes, lexicon, repo, url_hosts
 
 
 def main(argv):
     try:
-        src, scopes, lexicon_path = parse_args(argv)
+        src, scopes, lexicon_path, repo, url_hosts = parse_args(argv)
         try:
             if src in (None, '-'):
                 data = sys.stdin.buffer.read(MAX_INPUT_BYTES + 1)
@@ -279,7 +394,7 @@ def main(argv):
         lexicon = load_lexicon(lexicon_path)
         globs = scopes if scopes else DEFAULT_GLOBS
         dirs = [] if scopes else DEFAULT_DIRS
-        result = check(diff, lexicon, globs, dirs)
+        result = check(diff, lexicon, globs, dirs, Evidence(repo, url_hosts))
     except BadInput as exc:
         sys.stderr.write('claims_check: bad input: %s\n' % exc)
         return 2
