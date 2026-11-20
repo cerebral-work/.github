@@ -291,6 +291,23 @@ class Scope(unittest.TestCase):
             with self.subTest(path=path):
                 self.assert_in_scope(path)
 
+    def test_round3_default_scope(self):
+        for path in ('locales/en.json', 'src/i18n/en.json', 'page.njk', 'a/b.liquid',
+                     'docs/a.txt', 'public/a.json', 'site/data/copy.json'):
+            with self.subTest(path=path):
+                self.assert_in_scope(path)
+        for path in ('x.yaml', 'x.ts', 'LICENSE', 'LICENSE.md', 'legal/LICENSE.txt',
+                     'page.txt', 'page.json', 'assets/copy.txt', 'COPYING'):
+            with self.subTest(path=path):
+                self.assert_out_of_scope(path)
+
+    def test_scope_list_input_replaces_the_default(self):
+        text = 'We guarantee it.\n'
+        proc = run(make_diff({'src/a/b.ts': text}), '--scope-list', 'src/**/*.ts, copy/*.yaml')
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        proc = run(make_diff({'README.md': text}), '--scope-list', 'src/**/*.ts')
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
     def test_yaml_and_ts_outside_listed_dirs_stay_out(self):
         for path in ('conf/a.yaml', 'src/a.ts', 'src/a.txt'):
             with self.subTest(path=path):
@@ -595,7 +612,8 @@ class ClaimsJobShell(unittest.TestCase):
     def tearDownClass(cls):
         cls.server.shutdown()
 
-    def run_job(self, text, mode='enforce', answer=None, flags='-e'):
+    def run_job(self, text, mode='enforce', answer=None, flags='-e', base_files=None,
+                mv=None, extra_env=None):
         self.state.update(answer=answer, calls=0)
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -604,17 +622,25 @@ class ClaimsJobShell(unittest.TestCase):
             (root / 'docs/x.md').write_text('evidence\n')
             git(root, 'init', '-q', '-b', 'main')
             (root / 'site/a.md').write_text('x\n')
+            for rel, content in (base_files or {}).items():
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / rel).write_text(content)
             git(root, *IDENT, 'add', '-A')
             git(root, *IDENT, 'commit', '-q', '-m', 'base')
             base = git(root, 'rev-parse', 'HEAD').strip()
-            (root / 'site/a.md').write_text(text)
+            if mv:
+                (root / mv[1]).parent.mkdir(parents=True, exist_ok=True)
+                git(root, 'mv', mv[0], mv[1])
+            else:
+                (root / 'site/a.md').write_text(text)
             git(root, *IDENT, 'commit', '-qam', 'change')
             os.symlink(SCRIPT.parent.parent, root / '.jury-tools')
             env = {**GIT_ENV, 'LITELLM_URL': 'http://127.0.0.1:%d' % self.server.server_port,
                    'LITELLM_KEY': 'fixture', 'JURY_MODEL': 'm', 'CURL_TIMEOUT_INPUT': '30',
                    'JOB_TIMEOUT_MINUTES': '10', 'DIFF_BUDGET': '60000', 'CLAIMS_MODE': mode,
                    'CLAIMS_URL_HOSTS': 'github.com', 'BASE_REF': 'absent', 'BASE_SHA': base, 'PR_NUMBER': '1',
-                   'GITHUB_STEP_SUMMARY': str(root / 'summary.md'), 'RUNNER_TEMP': temp}
+                   'GITHUB_STEP_SUMMARY': str(root / 'summary.md'), 'RUNNER_TEMP': temp,
+                   **(extra_env or {})}
             cmd = ['bash'] + ([flags] if flags else []) + ['-c', self.script]
             proc = subprocess.run(cmd, cwd=root, env=env, capture_output=True, text=True)
         self.last_out = proc.stdout + proc.stderr
@@ -657,6 +683,28 @@ class ClaimsJobShell(unittest.TestCase):
                 rc, calls = self.run_job('We guarantee it.\n', answer=ans, flags=flags)
                 self.assertEqual((rc, calls), (2, 1), self.last_out)
                 self.assertIn('claims check:', self.last_out)
+
+    def test_duplicate_index_in_the_answer_fails_closed_with_exit_2(self):
+        ans = {'classifications': [{'index': 0, 'class': 'proven'},
+                                   {'index': 0, 'class': 'guarantee'}]}
+        rc, calls = self.run_job('We guarantee it.\n', answer=ans)
+        self.assertEqual((rc, calls), (2, 1), self.last_out)
+        self.assertIn('duplicate', self.last_out)
+
+    def test_rename_into_public_path_is_checked(self):
+        # `git diff` with rename detection hides every line of a moved file.
+        ans = {'classifications': [{'index': 0, 'class': 'guarantee'}]}
+        rc, calls = self.run_job('', answer=ans, mv=('tmp/o.dat', 'site/n.md'),
+                                 base_files={'tmp/o.dat': 'We guarantee it.\n'})
+        self.assertEqual((rc, calls), (1, 1), self.last_out)
+
+    def test_claims_paths_input_replaces_the_default_scope(self):
+        ans = {'classifications': [{'index': 0, 'class': 'guarantee'}]}
+        env = {'CLAIMS_PATHS': 'copy/*.yaml, other/*.txt'}
+        rc, calls = self.run_job('', answer=ans, mv=('tmp/o.dat', 'copy/n.yaml'),
+                                 base_files={'tmp/o.dat': 'We guarantee it.\n'}, extra_env=env)
+        self.assertEqual((rc, calls), (1, 1), self.last_out)
+        self.assertEqual(self.run_job('We guarantee it.\n', extra_env=env), (0, 0), self.last_out)
 
     def test_report_mode_never_fails(self):
         self.assertEqual(self.run_job('We guarantee it.\n', mode='report'), (0, 1))
